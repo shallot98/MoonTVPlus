@@ -7,6 +7,7 @@ import { getConfig } from '@/lib/config';
 import { generateFolderKey } from '@/lib/crypto';
 import { db } from '@/lib/db';
 import { OpenListClient } from '@/lib/openlist.client';
+import { buildOpenListPosterUrl, isOpenListSkipTMDB } from '@/lib/openlist-env-options';
 import {
   invalidateMetaInfoCache,
   MetaInfo,
@@ -113,8 +114,9 @@ export async function startOpenListRefresh(clearMetaInfo = false): Promise<{ tas
   const tmdbProxy = config.SiteConfig.TMDBProxy;
   const tmdbReverseProxy = config.SiteConfig.TMDBReverseProxy;
 
-  if (!tmdbApiKey) {
-    throw new Error('TMDB API Key 未配置');
+  // OPENLIST_SKIP_TMDB=1 或未配置 TMDB Key 时跳过刮削，直接以文件夹名入库
+  if (isOpenListSkipTMDB(tmdbApiKey)) {
+    console.log('[OpenList Refresh] 跳过 TMDB 刮削，使用文件夹名作为标题');
   }
 
   // 检测是否需要迁移
@@ -135,7 +137,7 @@ export async function startOpenListRefresh(clearMetaInfo = false): Promise<{ tas
     taskId,
     openListConfig.URL,
     rootPaths,
-    tmdbApiKey,
+    tmdbApiKey || '',
     tmdbProxy,
     tmdbReverseProxy,
     openListConfig.Username,
@@ -221,6 +223,7 @@ async function performMultiRootScan(
   scanMode: 'torrent' | 'name' | 'hybrid'
 ): Promise<void> {
   const client = new OpenListClient(url, username, password);
+  const skipTmdb = isOpenListSkipTMDB(tmdbApiKey);
 
   updateScanTaskProgress(taskId, 0, 0);
 
@@ -282,13 +285,39 @@ async function performMultiRootScan(
 
         const fullFolderPath = `${rootPath}${rootPath.endsWith('/') ? '' : '/'}${folder.name}`;
 
-        if (!clearMetaInfo && folderNameToKey.has(fullFolderPath)) {
+        const existingKey = folderNameToKey.get(fullFolderPath);
+        // 跳过刮削模式下，之前刮削失败的条目改写为文件夹名条目（复用原 key）
+        const rewriteFailed =
+          !!existingKey && skipTmdb && !!metaInfo.folders[existingKey]?.failed;
+
+        if (!clearMetaInfo && existingKey && !rewriteFailed) {
           existingCount++;
           continue;
         }
 
-        const folderKey = generateFolderKey(fullFolderPath, existingKeys);
+        const folderKey =
+          rewriteFailed && existingKey
+            ? existingKey
+            : generateFolderKey(fullFolderPath, existingKeys);
         existingKeys.add(folderKey);
+
+        if (skipTmdb) {
+          metaInfo.folders[folderKey] = {
+            folderName: fullFolderPath,
+            tmdb_id: 0,
+            title: folder.name,
+            poster_path: buildOpenListPosterUrl(folder.name),
+            release_date: '',
+            overview: '',
+            vote_average: 0,
+            media_type: 'tv',
+            last_updated: Date.now(),
+            failed: false,
+          };
+          folderNameToKey.set(fullFolderPath, folderKey);
+          newCount++;
+          continue;
+        }
 
         try {
           let searchQuery: string;
