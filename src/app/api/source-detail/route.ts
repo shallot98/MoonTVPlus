@@ -10,6 +10,7 @@ import {
   meetsMinVideoSize,
 } from '@/lib/openlist-env-options';
 import { getDetailFromApiV2 } from '@/lib/downstream';
+import { buildEpisodesGroups } from '@/lib/dyzb-broadcasts';
 import { getProxyToken } from '@/lib/emby-token';
 import { hasFeaturePermission } from '@/lib/permissions';
 import {
@@ -1274,6 +1275,11 @@ export async function GET(request: NextRequest) {
             )}&fileName=${encodeURIComponent(ep.fileName)}`
         ),
         episodes_titles: episodes.map((ep) => ep.title),
+        // dyzb 整场分组（DYZB_BROADCASTS_JSON 未配置/不可读时为 undefined）
+        episodes_groups: await buildEpisodesGroups(
+          folderName,
+          episodes.map((ep) => ep.fileName)
+        ),
         proxyMode: false, // openlist 源不使用代理模式
         category: pathMetaResolved.category || undefined,
         refresh14m: pathMetaResolved.refresh14m,

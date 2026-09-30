@@ -309,12 +309,30 @@ export interface SetLocalSettingsSyncResult {
 }
 
 // 搜索结果数据结构
+/** dyzb 整场直播分组（私人影库 OpenList 源，见 src/lib/dyzb-broadcasts.ts） */
+export interface EpisodeBroadcastGroup {
+  /** 整场 key（同一场的分集相同） */
+  key: string;
+  /** 该主播的第几场 */
+  index: number;
+  /** ISO 时间（带时区偏移） */
+  start: string;
+  end: string | null;
+  /** ok | pending（时长未测完，未与前后合并）| partial_estimated（部分时长为估算） */
+  state: string;
+  segs: number;
+  /** 秒；未知为 null */
+  dur: number | null;
+}
+
 export interface SearchResult {
   id: string;
   title: string;
   poster: string;
   episodes: string[];
   episodes_titles: string[];
+  /** 与 episodes 等长；null 表示该分集不属于任何整场 */
+  episodes_groups?: (EpisodeBroadcastGroup | null)[];
   source: string;
   source_name: string;
   weight?: number; // 播放源权重（来自后台配置，用于排序和优选评分）

@@ -23,7 +23,7 @@ import { generateStorageKey, getCachedPlayRecordsSnapshot } from '@/lib/db.clien
 import { isEpisodeHiddenByFilter } from '@/lib/episode-filter';
 import { loadAllLocalEpisodeProgressRecords } from '@/lib/episode-progress';
 import { isNetdiskSource } from '@/lib/netdisk/source';
-import { EpisodeFilterConfig,SearchResult } from '@/lib/types';
+import { EpisodeBroadcastGroup,EpisodeFilterConfig,SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8, SpeedTestError } from '@/lib/utils';
 import type { SpeedTestErrorType } from '@/lib/utils';
 
@@ -92,6 +92,50 @@ function getEpisodeDisplayLabel(
   return title;
 }
 
+/** ISO（带偏移）取字面上的日期与时分，与文件名里的本地时间保持一致 */
+function parseIsoWallClock(iso: string | null | undefined) {
+  const m = iso?.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  return { date: `${m[1]}-${m[2]}-${m[3]}`, md: `${m[2]}-${m[3]}`, hm: `${m[4]}:${m[5]}` };
+}
+
+function formatBroadcastDuration(seconds: number): string {
+  const totalMinutes = Math.round(seconds / 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return h > 0 ? `${h}小时${m}分` : `${m}分`;
+}
+
+/** 整场框头：`MM-DD HH:MM–HH:MM · N 段 · X小时Y分`（跨天 `次日HH:MM`） */
+function formatBroadcastHeader(group: EpisodeBroadcastGroup): string {
+  const start = parseIsoWallClock(group.start);
+  const end = parseIsoWallClock(group.end);
+  const parts: string[] = [];
+  if (start) {
+    let range = `${start.md} ${start.hm}`;
+    if (end) {
+      if (end.date === start.date) {
+        range += `–${end.hm}`;
+      } else {
+        const nextDay = new Date(`${start.date}T00:00:00Z`);
+        nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        range +=
+          nextDay.toISOString().slice(0, 10) === end.date
+            ? `–次日${end.hm}`
+            : `–${end.md} ${end.hm}`;
+      }
+    }
+    parts.push(range);
+  }
+  parts.push(`${group.segs} 段`);
+  if (typeof group.dur === 'number' && group.dur > 0) {
+    parts.push(
+      `${group.state === 'partial_estimated' ? '约' : ''}${formatBroadcastDuration(group.dur)}`
+    );
+  }
+  return parts.join(' · ');
+}
+
 interface EpisodeNamePopupState {
   title: string;
   x: number;
@@ -105,6 +149,8 @@ interface EpisodeButtonProps {
   isWatched: boolean;
   originalTitle?: string;
   inactiveEpisodeClass: string;
+  /** 整场框内：日期已在框头，短标签去掉开头的 `MM-DD ` */
+  hideDatePrefix?: boolean;
   /** 仅 netdisk 源启用长按/右键查看全名 */
   enableOriginalNamePopup?: boolean;
   onSelect: (zeroBasedIndex: number) => void;
@@ -118,12 +164,16 @@ const EpisodeButton: React.FC<EpisodeButtonProps> = ({
   isWatched,
   originalTitle,
   inactiveEpisodeClass,
+  hideDatePrefix = false,
   enableOriginalNamePopup = false,
   onSelect,
   onShowOriginalName,
 }) => {
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const displayLabel = getEpisodeDisplayLabel(originalTitle, episodeNumber);
+  const fullLabel = getEpisodeDisplayLabel(originalTitle, episodeNumber);
+  const displayLabel = hideDatePrefix
+    ? fullLabel.replace(/^\d{2}-\d{2} (?=\d{2}:\d{2})/, '')
+    : fullLabel;
   // 只要返回了原始集名就允许右键/长按。即使短标签与原名相同，
   // 也不能把按钮设为 disabled，否则 PC 端不会触发 contextmenu。
   const canShowOriginalName =
@@ -267,6 +317,8 @@ interface EpisodeSelectorProps {
   totalEpisodes: number;
   /** 剧集标题 */
   episodes_titles: string[];
+  /** dyzb 整场分组（与分集等长）；存在时网格视图把同一整场的分集放进一个方框 */
+  episodesGroups?: (EpisodeBroadcastGroup | null)[];
   /** 弹幕/TMDB 提供的分集名称（按 episodeNumber-1 索引）；存在时选集以列表形式展示 */
   richEpisodeNames?: (string | undefined)[];
   /** 每页显示多少集，默认 50 */
@@ -311,6 +363,7 @@ interface EpisodeSelectorProps {
 const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   totalEpisodes,
   episodes_titles,
+  episodesGroups,
   richEpisodeNames,
   episodesPerPage = 50,
   value = 1,
@@ -1016,6 +1069,18 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
     [getVideoInfo]
   );
 
+  // dyzb 整场分组：长度与分集数一致且至少一项非空才启用
+  const hasBroadcastGroups = useMemo(
+    () =>
+      Array.isArray(episodesGroups) &&
+      episodesGroups.length === totalEpisodes &&
+      episodesGroups.some((g) => !!g),
+    [episodesGroups, totalEpisodes]
+  );
+  const broadcastBoxBorderClass = useLightTextOnBackdrop
+    ? 'border-white/20'
+    : 'border-gray-200 dark:border-gray-700';
+
   const currentEpisodeGroup = episodeGroupsAsc[currentPage] ?? {
     label: '',
     episodes: [],
@@ -1273,6 +1338,87 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
                       />
                     );
                   });
+              })()}
+            </div>
+          ) : hasBroadcastGroups ? (
+            // dyzb 整场分组：连续属于同一整场的分集放进一个方框（分页切割时每页重新出现框头）
+            <div className='flex flex-col gap-3 overflow-y-auto flex-1 pb-4'>
+              {(() => {
+                const episodes = (
+                  descending
+                    ? [...currentEpisodeGroup.episodes].reverse()
+                    : currentEpisodeGroup.episodes
+                ).filter((episodeNumber) => !isEpisodeFiltered(episodeNumber));
+                const chunks: {
+                  group: EpisodeBroadcastGroup | null;
+                  episodes: number[];
+                }[] = [];
+                for (const episodeNumber of episodes) {
+                  const group = episodesGroups?.[episodeNumber - 1] ?? null;
+                  const last = chunks[chunks.length - 1];
+                  if (last && (last.group?.key ?? null) === (group?.key ?? null)) {
+                    last.episodes.push(episodeNumber);
+                  } else {
+                    chunks.push({ group, episodes: [episodeNumber] });
+                  }
+                }
+                const renderButton = (episodeNumber: number, inBox: boolean) => (
+                  <EpisodeButton
+                    key={episodeNumber}
+                    episodeNumber={episodeNumber}
+                    isActive={episodeNumber === value}
+                    isWatched={watchedEpisodes.has(episodeNumber)}
+                    originalTitle={episodes_titles?.[episodeNumber - 1]}
+                    inactiveEpisodeClass={inactiveEpisodeClass}
+                    hideDatePrefix={inBox}
+                    enableOriginalNamePopup={isNetdiskSource(currentSource)}
+                    onSelect={handleEpisodeClick}
+                    onShowOriginalName={showEpisodeNamePopup}
+                  />
+                );
+                return chunks.map((chunk, chunkIndex) => {
+                  if (!chunk.group) {
+                    return (
+                      <div
+                        key={`ungrouped-${chunkIndex}-${chunk.episodes[0]}`}
+                        className='flex flex-wrap gap-3 shrink-0'
+                      >
+                        {chunk.episodes.map((ep) => renderButton(ep, false))}
+                      </div>
+                    );
+                  }
+                  const group = chunk.group;
+                  const containsCurrent = chunk.episodes.includes(value);
+                  return (
+                    <div
+                      key={`${group.key}-${chunk.episodes[0]}`}
+                      data-broadcast-key={group.key}
+                      className={`shrink-0 rounded-lg border p-2 transition-colors ${
+                        containsCurrent
+                          ? 'border-green-500 dark:border-green-500 ring-1 ring-green-500/30'
+                          : broadcastBoxBorderClass
+                      }`}
+                    >
+                      <div
+                        className={`mb-2 flex items-center gap-1.5 text-xs font-medium ${
+                          containsCurrent
+                            ? 'text-green-600 dark:text-green-400'
+                            : faintTextClass
+                        }`}
+                      >
+                        <span className='min-w-0 truncate'>{formatBroadcastHeader(group)}</span>
+                        {group.state === 'pending' && (
+                          <span className='shrink-0 rounded px-1.5 py-px text-[10px] leading-4 bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400'>
+                            待定
+                          </span>
+                        )}
+                      </div>
+                      <div className='flex flex-wrap gap-2'>
+                        {chunk.episodes.map((ep) => renderButton(ep, true))}
+                      </div>
+                    </div>
+                  );
+                });
               })()}
             </div>
           ) : (

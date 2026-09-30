@@ -6534,6 +6534,9 @@ function PlayPageClient() {
           episodes_titles: (newDetail.episodes_titles || []).filter(
             (_, i) => i !== staleIndex
           ),
+          episodes_groups: newDetail.episodes_groups?.filter(
+            (_, i) => i !== staleIndex
+          ),
         };
       }
     }
@@ -11087,8 +11090,8 @@ function PlayPageClient() {
             )}
           </h1>
         </div>
-        {/* 第二行：播放器和选集 */}
-        <div className='space-y-2'>
+        {/* 第二行：播放器和选集（移动端竖屏摊平，播放器 sticky 置顶） */}
+        <div className={`space-y-2 ${isWebFullscreen ? '' : 'play-mobile-flatten'}`}>
           {/* 折叠控制 - 仅在 lg 及以上屏幕显示 */}
           <div className='hidden lg:flex justify-end'>
             <button
@@ -11129,18 +11132,20 @@ function PlayPageClient() {
           </div>
 
           <div
-            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isEpisodeSelectorCollapsed
+            className={`grid gap-4 lg:h-[500px] xl:h-[650px] 2xl:h-[750px] transition-all duration-300 ease-in-out ${isWebFullscreen ? '' : 'play-mobile-flatten'} ${isEpisodeSelectorCollapsed
               ? 'grid-cols-1'
               : 'grid-cols-1 md:grid-cols-4'
               }`}
           >
             {/* 播放器 */}
             <div
-              className={`transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 flex flex-col ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
+              className={`transition-all duration-300 ease-in-out rounded-xl border border-white/0 dark:border-white/30 flex flex-col ${isWebFullscreen ? '' : 'play-mobile-flatten'} ${isEpisodeSelectorCollapsed ? 'col-span-1' : 'md:col-span-3'
                 }`}
             >
               {/* 播放器容器 */}
-              <div className='relative w-full h-[300px] lg:flex-1 lg:min-h-0'>
+              <div
+                className={`relative w-full h-[300px] lg:flex-1 lg:min-h-0 ${isWebFullscreen ? '' : 'play-sticky-player'}`}
+              >
                 <div
                   ref={artRef}
                   className='bg-black w-full h-full rounded-xl overflow-hidden shadow-lg'
@@ -11865,6 +11870,7 @@ function PlayPageClient() {
               <EpisodeSelector
                 totalEpisodes={totalEpisodes}
                 episodes_titles={detail?.episodes_titles || []}
+                episodesGroups={detail?.episodes_groups}
                 richEpisodeNames={richEpisodeNames}
                 value={currentEpisodeIndex + 1}
                 onChange={playSync.shouldDisableControls ? () => { /* disabled */ } : handleEpisodeChange}

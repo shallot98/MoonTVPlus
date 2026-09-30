@@ -14,9 +14,11 @@ interface MobileBottomNavProps {
    * 主动指定当前激活的路径。当未提供时，自动使用 usePathname() 获取的路径。
    */
   activePath?: string;
+  /** 滚动隐藏（translateY 移出视口，不影响布局） */
+  hidden?: boolean;
 }
 
-const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
+const MobileBottomNav = ({ activePath, hidden = false }: MobileBottomNavProps) => {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const watchRoomContext = useWatchRoomContextSafe();
@@ -166,7 +168,10 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
 
   return (
     <nav
-      className='md:hidden fixed left-0 right-0 z-[600] bg-white/90 backdrop-blur-xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/80 dark:border-gray-700/50'
+      className={`md:hidden fixed left-0 right-0 z-[600] bg-white/90 backdrop-blur-xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/80 dark:border-gray-700/50 transition-transform duration-300 ease-out will-change-transform ${
+        hidden ? 'translate-y-full' : 'translate-y-0'
+      }`}
+      data-scroll-hidden={hidden ? 'true' : 'false'}
       style={{
         /* 紧贴视口底部，同时在内部留出安全区高度 */
         bottom: 0,

@@ -1,7 +1,9 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { type CSSProperties, useEffect, useState } from 'react';
+
+import { useHideOnScroll } from '@/hooks/useHideOnScroll';
 
 import { BackButton } from './BackButton';
 import MobileBottomNav from './MobileBottomNav';
@@ -21,7 +23,10 @@ interface PageLayoutProps {
 const PageLayout = ({ children, activePath = '/', hideNavigation = false }: PageLayoutProps) => {
   const router = useRouter();
   const [backgroundImage, setBackgroundImage] = useState('');
-  const shouldShowSharedBackground = !hideNavigation && activePath !== '/play';
+  const isPlayPage = activePath === '/play';
+  const shouldShowSharedBackground = !hideNavigation && !isPlayPage;
+  // 移动端顶栏/底栏：上滑隐藏、下滑出现（md:hidden，桌面不受影响）
+  const navHidden = useHideOnScroll({ enabled: !hideNavigation });
 
   useEffect(() => {
     router.prefetch('/search');
@@ -62,7 +67,16 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
 
   return (
     <VersionCheckProvider>
-      <div className='relative w-full min-h-screen overflow-hidden'>
+      <div
+        // 播放页用 overflow-x-clip：overflow-hidden 会成为滚动容器，导致播放器 sticky 失效
+        className={`relative w-full min-h-screen ${isPlayPage ? 'overflow-x-clip' : 'overflow-hidden'}`}
+        // 顶栏当前占用高度，供播放页 sticky 播放器定位（见 globals.css .play-sticky-player）
+        style={
+          {
+            '--mobile-header-offset': !hideNavigation && !navHidden ? '3rem' : '0px',
+          } as CSSProperties
+        }
+      >
         {shouldShowSharedBackground && backgroundImage && (
           <>
             <div
@@ -75,7 +89,10 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
 
         {/* 移动端头部 */}
         {!hideNavigation && (
-          <MobileHeader showBackButton={['/play', '/live'].includes(activePath)} />
+          <MobileHeader
+            showBackButton={['/play', '/live'].includes(activePath)}
+            hidden={navHidden}
+          />
         )}
 
         {/* 主要布局容器 */}
@@ -107,9 +124,14 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
 
             {/* 主内容 */}
             <main
-              className='flex-1 md:min-h-0 mb-14 md:mb-0 md:mt-0 mt-[calc(3rem+env(safe-area-inset-top))]'
+              className={`flex-1 md:min-h-0 md:mb-0 md:mt-0 mt-[calc(3rem+env(safe-area-inset-top))] ${
+                isPlayPage ? '' : 'mb-14'
+              }`}
               style={{
-                paddingBottom: 'calc(3.5rem + env(safe-area-inset-bottom))',
+                // 播放页移动端不显示底栏，只留安全区
+                paddingBottom: isPlayPage
+                  ? 'env(safe-area-inset-bottom)'
+                  : 'calc(3.5rem + env(safe-area-inset-bottom))',
               }}
             >
               {children}
@@ -118,9 +140,9 @@ const PageLayout = ({ children, activePath = '/', hideNavigation = false }: Page
         </div>
 
         {/* 移动端底部导航 */}
-        {!hideNavigation && (
+        {!hideNavigation && !isPlayPage && (
           <div className='md:hidden'>
-            <MobileBottomNav activePath={activePath} />
+            <MobileBottomNav activePath={activePath} hidden={navHidden} />
           </div>
         )}
       </div>

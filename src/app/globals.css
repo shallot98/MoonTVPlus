@@ -1205,3 +1205,18 @@ html[data-loading-style='grid'] .mtv-err-box {
     transform: scale(0.85);
   }
 }
+
+/* 播放页移动端竖屏：播放器 sticky 置顶（类似 B 站 App），顶栏隐藏时贴到安全区顶部。
+   外层 wrapper 用 display:contents 摊平，让 sticky 的约束范围覆盖整页（选集 + 详情）。
+   --mobile-header-offset 由 PageLayout 按顶栏显隐设置。横屏 / 桌面不受影响。 */
+@media (max-width: 767px) and (orientation: portrait) {
+  .play-mobile-flatten {
+    display: contents;
+  }
+  div.play-sticky-player {
+    position: sticky;
+    top: calc(var(--mobile-header-offset, 3rem) + env(safe-area-inset-top));
+    z-index: 30;
+    transition: top 300ms ease-out;
+  }
+}
