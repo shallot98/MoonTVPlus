@@ -189,11 +189,13 @@ async function listRootFolders(
   const pageSize = 100;
 
   while (true) {
+    // OpenList 对只读用户拒绝 refresh=true（Refresh without permission），
+    // OPENLIST_SCAN_REFRESH=0 时改用缓存列表
     const listResponse = await client.listDirectory(
       rootPath,
       currentPage,
       pageSize,
-      true
+      process.env.OPENLIST_SCAN_REFRESH !== '0'
     );
     if (listResponse.code !== 200) {
       throw new Error(`OpenList 列表获取失败: ${rootPath}`);
