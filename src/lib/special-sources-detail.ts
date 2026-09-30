@@ -211,11 +211,13 @@ export async function getOpenListDetail(
     '.m4v',
     '.vob',
   ];
+  const { meetsMinVideoSize } = await import('@/lib/openlist-env-options');
   const videoFiles = allFiles.filter((item) => {
     if (item.is_dir || item.name.startsWith('.') || item.name.endsWith('.json'))
       return false;
-    return videoExtensions.some((ext) =>
-      item.name.toLowerCase().endsWith(ext)
+    return (
+      videoExtensions.some((ext) => item.name.toLowerCase().endsWith(ext)) &&
+      meetsMinVideoSize(item)
     );
   });
 

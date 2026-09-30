@@ -7,6 +7,26 @@
  * - OPENLIST_MIN_VIDEO_MB：小于该大小（MB）的视频文件不计入分集，默认 0 不过滤
  */
 
+export const OPENLIST_VIDEO_EXTENSIONS = [
+  '.mp4',
+  '.mkv',
+  '.avi',
+  '.m3u8',
+  '.flv',
+  '.ts',
+  '.mov',
+  '.wmv',
+  '.webm',
+  '.rmvb',
+  '.rm',
+  '.mpg',
+  '.mpeg',
+  '.3gp',
+  '.f4v',
+  '.m4v',
+  '.vob',
+];
+
 export function isOpenListSkipTMDB(tmdbApiKey?: string): boolean {
   return process.env.OPENLIST_SKIP_TMDB === '1' || !tmdbApiKey;
 }
@@ -61,4 +81,30 @@ export function buildFilenameEpisodes<T extends { name: string; size?: number }>
       size: file.size,
       isOVA: false as boolean | undefined,
     }));
+}
+
+export function getMinVideoBytes(): number {
+  const mb = Number(process.env.OPENLIST_MIN_VIDEO_MB || 0);
+  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : 0;
+}
+
+/** OPENLIST_MIN_VIDEO_MB 大小过滤：未设置时恒为 true */
+export function meetsMinVideoSize(item: { size?: number }): boolean {
+  const minBytes = getMinVideoBytes();
+  return minBytes === 0 || (item.size || 0) >= minBytes;
+}
+
+/** 扫描用：是否为合格视频文件（扩展名 + 大小过滤） */
+export function isQualifiedVideoFile(item: {
+  name: string;
+  is_dir: boolean;
+  size?: number;
+}): boolean {
+  if (item.is_dir || item.name.startsWith('.') || item.name.endsWith('.json'))
+    return false;
+  const lowerName = item.name.toLowerCase();
+  return (
+    OPENLIST_VIDEO_EXTENSIONS.some((ext) => lowerName.endsWith(ext)) &&
+    meetsMinVideoSize(item)
+  );
 }

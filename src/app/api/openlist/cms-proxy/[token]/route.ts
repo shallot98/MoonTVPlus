@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
 import { hasFeaturePermission } from '@/lib/permissions';
+import { meetsMinVideoSize } from '@/lib/openlist-env-options';
 
 export const runtime = 'nodejs';
 
@@ -321,7 +322,7 @@ async function handleDetail(
   const videoExtensions = ['.mp4', '.mkv', '.avi', '.m3u8', '.flv', '.ts', '.mov', '.wmv', '.webm', '.rmvb', '.rm', '.mpg', '.mpeg', '.3gp', '.f4v', '.m4v', '.vob'];
   const videoFiles = allFiles.filter((item) => {
     if (item.is_dir || item.name.startsWith('.') || item.name.endsWith('.json')) return false;
-    return videoExtensions.some(ext => item.name.toLowerCase().endsWith(ext));
+    return videoExtensions.some(ext => item.name.toLowerCase().endsWith(ext)) && meetsMinVideoSize(item);
   });
 
   if (!videoInfo) {

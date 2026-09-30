@@ -7,7 +7,12 @@ import { getConfig } from '@/lib/config';
 import { generateFolderKey } from '@/lib/crypto';
 import { db } from '@/lib/db';
 import { OpenListClient } from '@/lib/openlist.client';
-import { buildOpenListPosterUrl, isOpenListSkipTMDB } from '@/lib/openlist-env-options';
+import {
+  buildOpenListPosterUrl,
+  getMinVideoBytes,
+  isOpenListSkipTMDB,
+  isQualifiedVideoFile,
+} from '@/lib/openlist-env-options';
 import {
   invalidateMetaInfoCache,
   MetaInfo,
@@ -208,6 +213,39 @@ async function listRootFolders(
 }
 
 /**
+ * 文件夹内是否存在合格视频（OPENLIST_MIN_VIDEO_MB 大小过滤）
+ */
+async function folderHasQualifiedVideo(
+  client: OpenListClient,
+  folderPath: string
+): Promise<boolean> {
+  let currentPage = 1;
+  const pageSize = 100;
+
+  while (true) {
+    const listResponse = await client.listDirectory(
+      folderPath,
+      currentPage,
+      pageSize
+    );
+    if (listResponse.code !== 200) {
+      throw new Error(`OpenList 列表获取失败: ${folderPath}`);
+    }
+
+    const content = listResponse.data.content || [];
+    if (content.some((item) => isQualifiedVideoFile(item))) {
+      return true;
+    }
+
+    if (content.length < pageSize) {
+      return false;
+    }
+
+    currentPage++;
+  }
+}
+
+/**
  * 扫描多个根目录：先汇总全部文件夹数量，再连续累计进度，最后统一完成任务
  */
 async function performMultiRootScan(
@@ -293,6 +331,24 @@ async function performMultiRootScan(
         if (!clearMetaInfo && existingKey && !rewriteFailed) {
           existingCount++;
           continue;
+        }
+
+        if (getMinVideoBytes() > 0) {
+          try {
+            if (!(await folderHasQualifiedVideo(client, fullFolderPath))) {
+              console.log(
+                `[OpenList Refresh] 跳过无合格视频的文件夹: ${fullFolderPath}`
+              );
+              continue;
+            }
+          } catch (error) {
+            console.error(
+              `[OpenList Refresh] 检查文件夹视频失败: ${fullFolderPath}`,
+              error
+            );
+            errorCount++;
+            continue;
+          }
         }
 
         const folderKey =

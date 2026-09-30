@@ -9,6 +9,7 @@ import { OpenListClient } from '@/lib/openlist.client';
 import {
   buildFilenameEpisodes,
   isEpisodeTitleFromFilename,
+  meetsMinVideoSize,
 } from '@/lib/openlist-env-options';
 import {
   getCachedVideoInfo,
@@ -167,7 +168,8 @@ export async function GET(request: NextRequest) {
 
       // 检查是否是视频文件（不区分大小写）
       const lowerName = item.name.toLowerCase();
-      return videoExtensions.some(ext => lowerName.endsWith(ext));
+      // OPENLIST_MIN_VIDEO_MB：过滤过小的碎片文件
+      return videoExtensions.some(ext => lowerName.endsWith(ext)) && meetsMinVideoSize(item);
     });
 
     // 5. 构建集数信息（不包含播放链接）
