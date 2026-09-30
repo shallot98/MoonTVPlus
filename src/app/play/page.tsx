@@ -10095,7 +10095,11 @@ function PlayPageClient() {
               fallbackVideo.crossOrigin === 'anonymous' &&
               !mediaCorsFallbackRef.current &&
               (videoMediaTypeRef.current === 'file' ||
-                isNetdiskNativeHlsActive(currentSourceRef.current))
+                isNetdiskNativeHlsActive(currentSourceRef.current) ||
+                // openlist 服务端探测失败（mediaType 为空，如无扩展名且探测被拒的直链）
+                // 但仍由原生 <video> 播放（未挂 HLS.js）时同样需要回退
+                (currentSourceRef.current === 'openlist' &&
+                  !(fallbackVideo as any).hls))
             ) {
               mediaCorsFallbackRef.current = true;
               console.warn(
