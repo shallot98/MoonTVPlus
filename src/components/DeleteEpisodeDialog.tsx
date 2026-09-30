@@ -69,14 +69,10 @@ export default function DeleteEpisodeDialog({
   // null = 选择删除范围；否则为二次确认步骤
   const [scope, setScope] = useState<DeleteScope | null>(null);
 
+  // 关闭时回到「选择范围」步骤，下次打开从头开始
   useEffect(() => {
-    if (isOpen) setScope(null);
+    if (!isOpen) setScope(null);
   }, [isOpen]);
-
-  // 每一步都把焦点放回「取消」
-  useEffect(() => {
-    if (isOpen) cancelButtonRef.current?.focus();
-  }, [isOpen, scope]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -123,6 +119,11 @@ export default function DeleteEpisodeDialog({
       previouslyFocused?.focus?.();
     };
   }, [isOpen]);
+
+  // 每一步都把焦点放回「取消」（须在上面记录 previouslyFocused 之后执行）
+  useEffect(() => {
+    if (isOpen) cancelButtonRef.current?.focus();
+  }, [isOpen, scope]);
 
   if (!isOpen || typeof document === 'undefined') return null;
 
