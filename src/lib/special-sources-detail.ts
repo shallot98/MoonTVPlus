@@ -236,7 +236,13 @@ export async function getOpenListDetail(
     setCachedVideoInfo(folderPath, videoInfo);
   }
 
-  const episodes = videoFiles
+  const { buildFilenameEpisodes, isEpisodeTitleFromFilename } = await import(
+    '@/lib/openlist-env-options'
+  );
+
+  const episodes = isEpisodeTitleFromFilename()
+    ? buildFilenameEpisodes(videoFiles)
+    : videoFiles
     .map((file, index) => {
       const parsed = parseVideoFileName(file.name);
       let episodeInfo;

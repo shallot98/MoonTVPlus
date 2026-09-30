@@ -7,6 +7,10 @@ import { getConfig } from '@/lib/config';
 import { requireFeaturePermission } from '@/lib/permissions';
 import { OpenListClient } from '@/lib/openlist.client';
 import {
+  buildFilenameEpisodes,
+  isEpisodeTitleFromFilename,
+} from '@/lib/openlist-env-options';
+import {
   getCachedVideoInfo,
   setCachedVideoInfo,
   VideoInfo,
@@ -175,7 +179,9 @@ export async function GET(request: NextRequest) {
     );
     const hasMultipleSeasons = parsedSeasons.size > 1;
 
-    const episodes = videoFiles
+    const episodes = isEpisodeTitleFromFilename()
+      ? buildFilenameEpisodes(videoFiles)
+      : videoFiles
       .map((file, index) => {
         // 总是重新解析文件名，确保使用最新的解析逻辑
         const parsed = parseVideoFileName(file.name);
