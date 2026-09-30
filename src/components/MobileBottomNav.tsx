@@ -142,7 +142,12 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       });
     }
 
-    setNavItems(items);
+    // HIDE_DOUBAN_NAV=1：隐藏豆瓣分类入口（电影/剧集/动漫/综艺/自定义）
+    const visibleItems = runtimeConfig?.HIDE_DOUBAN_NAV
+      ? items.filter((item) => !item.href.startsWith('/douban'))
+      : items;
+
+    setNavItems(visibleItems);
   }, [watchRoomContext?.isEnabled]);
 
   const isActive = (href: string) => {

@@ -14,6 +14,12 @@ export async function middleware(request: NextRequest) {
     return new NextResponse('Not Found', { status: 404 });
   }
 
+  // HOME_REDIRECT：首页跳转到指定路径（如 /private-library）
+  const homeRedirect = process.env.HOME_REDIRECT;
+  if (pathname === '/' && homeRedirect && homeRedirect.startsWith('/') && homeRedirect !== '/') {
+    return NextResponse.redirect(new URL(homeRedirect, request.url));
+  }
+
   // 跳过不需要认证的路径
   if (shouldSkipAuth(pathname)) {
     return NextResponse.next();

@@ -364,6 +364,7 @@ export default async function RootLayout({
     NETDISK_TRANSFER_ENABLED: userFeatureAccess.netdisk_transfer,
     NETDISK_TEMP_PLAY_ENABLED: userFeatureAccess.netdisk_temp_play,
     FESTIVE_EFFECT_ENABLED: process.env.FESTIVE_EFFECT_ENABLED === 'true',
+    HIDE_DOUBAN_NAV: process.env.HIDE_DOUBAN_NAV === '1',
     RATE_BADGE_STYLE: rateBadgeStyle,
   };
 
