@@ -12,7 +12,7 @@ interface UseHideOnScrollOptions {
 }
 
 /** 本项目的滚动容器是 document.body（html/body height:100% + overflow-x:hidden），兼容 window 滚动 */
-function getScrollTop(): number {
+export function getScrollTop(): number {
   return Math.max(
     window.scrollY || 0,
     document.documentElement.scrollTop || 0,

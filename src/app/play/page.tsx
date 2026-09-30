@@ -17,6 +17,10 @@ import { isAnimeCategoryText } from '@/lib/anime-keyword-expr';
 import { createAnime4KRenderer } from '@/lib/anime4k';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import {
+  formatBroadcastRange,
+  formatBroadcastTotalDuration,
+} from '@/lib/broadcast-format';
+import {
   clearDanmakuCacheByTitle,
   convertDanmakuFormat,
   getDanmakuById,
@@ -88,6 +92,7 @@ import {
   convertSubtitleFileToVttObjectUrl,
   CUSTOM_SUBTITLE_ACCEPT,
 } from '@/lib/subtitle-converter';
+import { clearPrivateLibrarySnapshots } from '@/lib/private-library-snapshot';
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
 import { DanmakuFilterConfig, EpisodeFilterConfig, SearchResult } from '@/lib/types';
 import { base58Decode, getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
@@ -103,7 +108,10 @@ import {
 import AIChatPanel from '@/components/AIChatPanel';
 import AIComments from '@/components/AIComments';
 import CorrectDialog from '@/components/CorrectDialog';
-import DeleteEpisodeDialog from '@/components/DeleteEpisodeDialog';
+import DeleteEpisodeDialog, {
+  type DeleteBroadcastOption,
+  type DeleteScope,
+} from '@/components/DeleteEpisodeDialog';
 import DanmakuFilterSettings from '@/components/DanmakuFilterSettings';
 import DetailPanel from '@/components/DetailPanel';
 import DoubanComments from '@/components/DoubanComments';
@@ -750,16 +758,16 @@ function PlayPageClient() {
   const [toast, setToast] = useState<ToastProps | null>(null);
   const [isTranscoding, setIsTranscoding] = useState(false);
   // 私人影库（OpenList）删除本集：弹窗目标（打开时锁定当前分集）、请求状态与错误
-  const [deleteEpisodeTarget, setDeleteEpisodeTarget] = useState<{
-    folder: string;
-    fileName: string;
-    episodeIndex: number;
-    episodeTitle: string;
-    anchorName: string;
-  } | null>(null);
+  const [deleteEpisodeTarget, setDeleteEpisodeTarget] =
+    useState<DeleteEpisodeTarget | null>(null);
   const [isDeletingEpisode, setIsDeletingEpisode] = useState(false);
   const [deleteEpisodeError, setDeleteEpisodeError] = useState<string | null>(null);
+  const [deleteFailedFiles, setDeleteFailedFiles] = useState<
+    { name: string; error: string }[]
+  >([]);
   const deleteDialogWasPlayingRef = useRef(false);
+  // 整场删除部分失败时，关闭弹窗后再执行的刷新/切集
+  const pendingPostDeleteRef = useRef<PostDeleteInfo | null>(null);
 
   useEffect(() => {
     danmakuSettingsRef.current = danmakuSettings;
@@ -6388,7 +6396,7 @@ function PlayPageClient() {
   };
 
   // ---------------------------------------------------------------------------
-  // 私人影库（OpenList）删除本集
+  // 私人影库（OpenList）删除本分段 / 本场直播
   // ---------------------------------------------------------------------------
   const openListDeleteAllowed =
     typeof window !== 'undefined' &&
@@ -6400,6 +6408,63 @@ function PlayPageClient() {
     detail?.source === 'openlist' &&
     !!parseOpenListEpisodeUrl(detail.episodes?.[currentEpisodeIndex]) &&
     !playSync.shouldDisableControls;
+
+  /** 当前分集所属整场的删除选项；不可整场删除时给出原因 */
+  const buildDeleteBroadcastOption = (
+    d: SearchResult,
+    idx: number,
+    folder: string
+  ): Pick<DeleteEpisodeTarget, 'broadcast' | 'broadcastDisabledReason'> => {
+    const groups = d.episodes_groups;
+    const group = groups?.[idx] ?? null;
+    if (!group) {
+      return {
+        broadcast: null,
+        broadcastDisabledReason: '当前分集没有整场分组数据，无法判断整场范围',
+      };
+    }
+    if (group.state !== 'ok') {
+      return {
+        broadcast: null,
+        broadcastDisabledReason: '本场分段时长还在统计，暂时无法准确判断整场范围',
+      };
+    }
+    const fileNames: string[] = [];
+    for (let i = 0; i < (d.episodes || []).length; i++) {
+      if (groups?.[i]?.key !== group.key) continue;
+      const p = parseOpenListEpisodeUrl(d.episodes[i]);
+      if (!p || p.folder !== folder) {
+        return {
+          broadcast: null,
+          broadcastDisabledReason: '无法识别本场分段对应的文件',
+        };
+      }
+      fileNames.push(p.fileName);
+    }
+    if (fileNames.length === 0) {
+      return {
+        broadcast: null,
+        broadcastDisabledReason: '无法识别本场分段对应的文件',
+      };
+    }
+    const rangeText = formatBroadcastRange(group);
+    const durationText = formatBroadcastTotalDuration(group);
+    const hidden = group.segs - fileNames.length;
+    return {
+      broadcast: {
+        key: group.key,
+        label: `删除本场直播（${fileNames.length} 段${rangeText ? `，${rangeText}` : ''}）`,
+        rangeText,
+        fileNames,
+        durationText: durationText || undefined,
+        note:
+          hidden > 0
+            ? `dyzb 统计本场共 ${group.segs} 段，其中 ${hidden} 段未出现在选集中（如过小的碎片），不会删除`
+            : undefined,
+      },
+      broadcastDisabledReason: null,
+    };
+  };
 
   const openDeleteEpisodeDialog = () => {
     const d = detailRef.current;
@@ -6428,89 +6493,82 @@ function PlayPageClient() {
       }
     }
 
+    pendingPostDeleteRef.current = null;
     setDeleteEpisodeError(null);
+    setDeleteFailedFiles([]);
     setDeleteEpisodeTarget({
       ...parsed,
       episodeIndex: idx,
       episodeTitle: d.episodes_titles?.[idx] || `第 ${idx + 1} 集`,
       anchorName: videoTitleRef.current || d.title || '',
+      ...buildDeleteBroadcastOption(d, idx, parsed.folder),
     });
   };
 
-  const closeDeleteEpisodeDialog = () => {
-    if (isDeletingEpisode) return;
-    setDeleteEpisodeTarget(null);
-    setDeleteEpisodeError(null);
-    if (deleteDialogWasPlayingRef.current && artPlayerRef.current) {
-      deleteDialogWasPlayingRef.current = false;
-      try {
-        artPlayerRef.current.play();
-      } catch (err) {
-        console.warn('[DeleteEpisode] 恢复播放失败:', err);
-      }
-    }
-  };
-
-  const handleConfirmDeleteEpisode = async () => {
-    const target = deleteEpisodeTarget;
+  /**
+   * 删除完成后的收尾：同步本地进度 → 重新拉取详情与分组 → 播放原位置之后的下一集
+   * （删除范围在末尾则播放前一集）→ 无分集时回私人影库
+   */
+  const applyPostDelete = async (info: PostDeleteInfo) => {
     const d = detailRef.current;
-    if (!target || !d || isDeletingEpisode) return;
-
+    if (!d) return;
     setIsDeletingEpisode(true);
-    setDeleteEpisodeError(null);
 
-    let result: {
-      success?: boolean;
-      error?: string;
-      details?: string;
-      warning?: string;
-      folderRemoved?: boolean;
-    } = {};
-    try {
-      const response = await fetch('/api/openlist/delete-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          folder: target.folder,
-          fileName: target.fileName,
-        }),
-      });
-      result = (await response.json().catch(() => null)) || {};
-      if (!response.ok || !result.success) {
-        const message = result.error || `请求失败（HTTP ${response.status}）`;
-        throw new Error(
-          result.details ? `${message}（${result.details}）` : message
-        );
+    // 私人影库列表快照可能含已删除的主播，作废
+    clearPrivateLibrarySnapshots();
+
+    const oldEpisodes = d.episodes || [];
+    const deletedSet = new Set(info.deletedFileNames);
+    const deletedIndexes: number[] = [];
+    oldEpisodes.forEach((url, i) => {
+      const p = parseOpenListEpisodeUrl(url);
+      if (p && p.folder === info.folder && deletedSet.has(p.fileName)) {
+        deletedIndexes.push(i);
       }
-    } catch (err) {
-      setDeleteEpisodeError(err instanceof Error ? err.message : String(err));
-      setIsDeletingEpisode(false);
-      return;
-    }
+    });
+    const deletedUrls = new Set(deletedIndexes.map((i) => oldEpisodes[i]));
 
-    // 文件已删除：本地单集进度（按 0 基索引存储）同步前移，避免错配到相邻分集
+    // 本地单集进度（按 0 基索引存储）同步前移：从大到小逐个移除，避免错配到相邻分集
     try {
-      removeLocalEpisodeProgressIndex(
-        episodeProgressContentKey,
-        target.episodeIndex
-      );
+      [...deletedIndexes]
+        .sort((a, b) => b - a)
+        .forEach((i) =>
+          removeLocalEpisodeProgressIndex(episodeProgressContentKey, i)
+        );
     } catch (err) {
       console.warn('[DeleteEpisode] 同步本地单集进度失败:', err);
     }
 
     const source = currentSourceRef.current;
     const id = currentIdRef.current;
-    const oldEpisodes = d.episodes || [];
-    const deletedUrl = oldEpisodes[target.episodeIndex];
-    // 原位置的下一集；删的是最后一集则取上一集
-    const preferredUrl =
-      oldEpisodes[target.episodeIndex + 1] ??
-      oldEpisodes[target.episodeIndex - 1];
+    const anchorIndex = currentEpisodeIndexRef.current;
+    // 原位置之后第一个未删除的分集；删除范围在末尾则取之前最近的一个
+    const maxDeleted = deletedIndexes.length
+      ? Math.max(...deletedIndexes)
+      : anchorIndex;
+    const minDeleted = deletedIndexes.length
+      ? Math.min(...deletedIndexes)
+      : anchorIndex;
+    let preferredUrl: string | undefined;
+    for (let i = maxDeleted + 1; i < oldEpisodes.length; i++) {
+      if (!deletedUrls.has(oldEpisodes[i])) {
+        preferredUrl = oldEpisodes[i];
+        break;
+      }
+    }
+    if (!preferredUrl) {
+      for (let i = minDeleted - 1; i >= 0; i--) {
+        if (!deletedUrls.has(oldEpisodes[i])) {
+          preferredUrl = oldEpisodes[i];
+          break;
+        }
+      }
+    }
 
-    // 重新拉取详情；失败时退回本地列表（并在提示里说明）
+    // 重新拉取详情（含整场分组）；失败时退回本地列表（并在提示里说明）
     let newDetail: SearchResult = { ...d };
     let refreshError = '';
-    if (!result.folderRemoved) {
+    if (!info.folderRemoved) {
       try {
         const res = await fetch(
           appendSpecialSourceParam(
@@ -6526,31 +6584,33 @@ function PlayPageClient() {
         refreshError = err instanceof Error ? err.message : String(err);
       }
       // 列表里仍有已删除分集（详情拉取失败，或 OpenList 目录缓存未更新）时本地剔除
-      const staleIndex = deletedUrl ? newDetail.episodes.indexOf(deletedUrl) : -1;
-      if (staleIndex >= 0) {
+      const keep = newDetail.episodes.map((url) => !deletedUrls.has(url));
+      if (keep.some((k) => !k)) {
         newDetail = {
           ...newDetail,
-          episodes: newDetail.episodes.filter((_, i) => i !== staleIndex),
+          episodes: newDetail.episodes.filter((_, i) => keep[i]),
           episodes_titles: (newDetail.episodes_titles || []).filter(
-            (_, i) => i !== staleIndex
+            (_, i) => keep[i]
           ),
           episodes_groups: newDetail.episodes_groups?.filter(
-            (_, i) => i !== staleIndex
+            (_, i) => keep[i]
           ),
         };
       }
     }
 
     const newEpisodes = newDetail.episodes || [];
-    if (result.folderRemoved || newEpisodes.length === 0) {
+    if (info.folderRemoved || newEpisodes.length === 0) {
       // 该主播已无分集：播放记录无处可指，直接删除后返回私人影库
       try {
         await deletePlayRecord(source, id);
       } catch (err) {
         console.warn('[DeleteEpisode] 删除播放记录失败:', err);
       }
+      pendingPostDeleteRef.current = null;
       deleteDialogWasPlayingRef.current = false;
       setDeleteEpisodeTarget(null);
+      setDeleteFailedFiles([]);
       setIsDeletingEpisode(false);
       setToast({
         message: '已删除，该主播已无分集，即将返回私人影库',
@@ -6563,7 +6623,7 @@ function PlayPageClient() {
 
     let targetIndex = preferredUrl ? newEpisodes.indexOf(preferredUrl) : -1;
     if (targetIndex < 0) {
-      targetIndex = Math.min(target.episodeIndex, newEpisodes.length - 1);
+      targetIndex = Math.min(minDeleted, newEpisodes.length - 1);
     }
 
     // 播放记录改指向新的当前集（避免指向越界或已删除的分集）
@@ -6617,18 +6677,162 @@ function PlayPageClient() {
       window.history.replaceState({}, '', nextUrl.toString());
     }
 
+    pendingPostDeleteRef.current = null;
     deleteDialogWasPlayingRef.current = false;
     setDeleteEpisodeTarget(null);
+    setDeleteFailedFiles([]);
     setIsDeletingEpisode(false);
+    const doneText = info.partialError
+      ? `部分删除：成功 ${info.deletedFileNames.length} 个，${info.partialError}`
+      : info.deletedFileNames.length > 1
+        ? `已删除本场 ${info.deletedFileNames.length} 个文件`
+        : '已删除';
     setToast({
       message: refreshError
-        ? `已删除，但重新拉取分集列表失败（已按本地列表更新）：${refreshError}`
-        : result.warning
-          ? `已删除（${result.warning}）`
-          : '已删除',
-      type: refreshError || result.warning ? 'info' : 'success',
+        ? `${doneText}，但重新拉取分集列表失败（已按本地列表更新）：${refreshError}`
+        : info.warning
+          ? `${doneText}（${info.warning}）`
+          : doneText,
+      type: info.partialError
+        ? 'error'
+        : refreshError || info.warning
+          ? 'info'
+          : 'success',
       onClose: () => setToast(null),
     });
+  };
+
+  const closeDeleteEpisodeDialog = () => {
+    if (isDeletingEpisode) return;
+    // 整场删除部分失败：关闭时再刷新列表（已删除的文件不能留在选集里）
+    const pending = pendingPostDeleteRef.current;
+    if (pending) {
+      pendingPostDeleteRef.current = null;
+      void applyPostDelete(pending);
+      return;
+    }
+    setDeleteEpisodeTarget(null);
+    setDeleteEpisodeError(null);
+    setDeleteFailedFiles([]);
+    if (deleteDialogWasPlayingRef.current && artPlayerRef.current) {
+      deleteDialogWasPlayingRef.current = false;
+      try {
+        artPlayerRef.current.play();
+      } catch (err) {
+        console.warn('[DeleteEpisode] 恢复播放失败:', err);
+      }
+    }
+  };
+
+  const handleConfirmDeleteEpisode = async (scope: DeleteScope) => {
+    const target = deleteEpisodeTarget;
+    const d = detailRef.current;
+    if (!target || !d || isDeletingEpisode || pendingPostDeleteRef.current) {
+      return;
+    }
+    if (scope === 'broadcast' && !target.broadcast) return;
+
+    setIsDeletingEpisode(true);
+    setDeleteEpisodeError(null);
+    setDeleteFailedFiles([]);
+
+    if (scope === 'segment') {
+      let result: {
+        success?: boolean;
+        error?: string;
+        details?: string;
+        warning?: string;
+        folderRemoved?: boolean;
+      } = {};
+      try {
+        const response = await fetch('/api/openlist/delete-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folder: target.folder,
+            fileName: target.fileName,
+          }),
+        });
+        result = (await response.json().catch(() => null)) || {};
+        if (!response.ok || !result.success) {
+          const message = result.error || `请求失败（HTTP ${response.status}）`;
+          throw new Error(
+            result.details ? `${message}（${result.details}）` : message
+          );
+        }
+      } catch (err) {
+        setDeleteEpisodeError(err instanceof Error ? err.message : String(err));
+        setIsDeletingEpisode(false);
+        return;
+      }
+      await applyPostDelete({
+        folder: target.folder,
+        deletedFileNames: [target.fileName],
+        folderRemoved: !!result.folderRemoved,
+        warning: result.warning,
+      });
+      return;
+    }
+
+    const broadcast = target.broadcast!;
+    let response: Response;
+    let result: {
+      success?: boolean;
+      error?: string;
+      details?: string;
+      warning?: string;
+      folderRemoved?: boolean;
+      deleted?: string[];
+      failed?: { name: string; error: string }[];
+      serverFileNames?: string[];
+    } = {};
+    try {
+      response = await fetch('/api/openlist/delete-broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folder: target.folder,
+          broadcastKey: broadcast.key,
+          fileNames: broadcast.fileNames,
+        }),
+      });
+      result = (await response.json().catch(() => null)) || {};
+    } catch (err) {
+      setDeleteEpisodeError(err instanceof Error ? err.message : String(err));
+      setIsDeletingEpisode(false);
+      return;
+    }
+
+    const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+    const failed = Array.isArray(result.failed) ? result.failed : [];
+    if (response.ok && result.success) {
+      await applyPostDelete({
+        folder: target.folder,
+        deletedFileNames: deleted,
+        folderRemoved: !!result.folderRemoved,
+        warning: result.warning,
+      });
+      return;
+    }
+
+    let message = result.error || `请求失败（HTTP ${response.status}）`;
+    if (result.details) message += `（${result.details}）`;
+    if (response.status === 409 && Array.isArray(result.serverFileNames)) {
+      message += `\n服务端当前本场 ${result.serverFileNames.length} 个文件，请刷新页面后重试`;
+    }
+    setDeleteEpisodeError(message);
+    setDeleteFailedFiles(failed);
+    if (deleted.length > 0) {
+      // 部分成功：关闭弹窗时刷新列表并切集
+      pendingPostDeleteRef.current = {
+        folder: target.folder,
+        deletedFileNames: deleted,
+        folderRemoved: !!result.folderRemoved,
+        warning: result.warning,
+        partialError: `失败 ${failed.length} 个`,
+      };
+    }
+    setIsDeletingEpisode(false);
   };
 
   // ---------------------------------------------------------------------------
@@ -11073,21 +11277,6 @@ function PlayPageClient() {
                 {playbackSourceBadge === 'local' ? '本地播放' : '离线播放'}
               </span>
             )}
-            {/* 删除本集：仅私人影库（OpenList）+ OPENLIST_ALLOW_DELETE + 站长/管理员 */}
-            {canDeleteCurrentEpisode && (
-              <button
-                type='button'
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openDeleteEpisodeDialog();
-                }}
-                className='inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-red-300 text-red-600 bg-white/80 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:bg-gray-800/80 dark:hover:bg-red-900/30 transition-colors'
-                title='从 OpenList 删除当前分集文件'
-              >
-                <Trash2 className='w-3.5 h-3.5' aria-hidden='true' />
-                <span className='whitespace-nowrap'>删除本集</span>
-              </button>
-            )}
           </h1>
         </div>
         {/* 第二行：播放器和选集（移动端竖屏摊平，播放器 sticky 置顶） */}
@@ -11972,6 +12161,21 @@ function PlayPageClient() {
                         详
                       </button>
                     )}
+                    {/* 删除：仅私人影库（OpenList）+ OPENLIST_ALLOW_DELETE + 站长/管理员 */}
+                    {canDeleteCurrentEpisode && (
+                      <button
+                        type='button'
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openDeleteEpisodeDialog();
+                        }}
+                        className='flex-shrink-0 -m-2 p-2 rounded-lg hover:opacity-80 transition-opacity'
+                        title='删除'
+                        aria-label='删除'
+                      >
+                        <Trash2 className='h-6 w-6 text-gray-700 dark:text-gray-300' aria-hidden='true' />
+                      </button>
+                    )}
                     {/* 纠错按钮 - 仅小雅源显示 */}
                     {detail && detail.source === 'xiaoya' && (
                       <button
@@ -12218,8 +12422,12 @@ function PlayPageClient() {
         anchorName={deleteEpisodeTarget?.anchorName || ''}
         episodeTitle={deleteEpisodeTarget?.episodeTitle || ''}
         fileName={deleteEpisodeTarget?.fileName || ''}
+        broadcast={deleteEpisodeTarget?.broadcast || null}
+        broadcastDisabledReason={deleteEpisodeTarget?.broadcastDisabledReason || null}
+        broadcastFallbackLabel='删除本场直播'
         isDeleting={isDeletingEpisode}
         error={deleteEpisodeError}
+        failedFiles={deleteFailedFiles}
         onConfirm={handleConfirmDeleteEpisode}
         onCancel={closeDeleteEpisodeDialog}
       />
@@ -12496,6 +12704,26 @@ function PlayPageClient() {
       )}
     </PageLayout>
   );
+}
+
+/** 删除弹窗目标：打开时锁定当前分集与所属整场 */
+interface DeleteEpisodeTarget {
+  folder: string;
+  fileName: string;
+  episodeIndex: number;
+  episodeTitle: string;
+  anchorName: string;
+  broadcast: (DeleteBroadcastOption & { key: string }) | null;
+  broadcastDisabledReason: string | null;
+}
+
+interface PostDeleteInfo {
+  folder: string;
+  deletedFileNames: string[];
+  folderRemoved: boolean;
+  warning?: string;
+  /** 整场删除部分失败的说明 */
+  partialError?: string;
 }
 
 // 解析私人影库分集地址 /api/openlist/play?folder=...&fileName=...

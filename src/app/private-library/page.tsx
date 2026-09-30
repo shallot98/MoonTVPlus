@@ -4,14 +4,21 @@
 
 import { ArrowDownWideNarrow, ArrowUpNarrowWide,Film } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useMemo,useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo,useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import {
+  PrivateLibrarySnapshot,
+  readPrivateLibrarySnapshot,
+  writePrivateLibrarySnapshot,
+} from '@/lib/private-library-snapshot';
 import { base58Encode } from '@/lib/utils';
 
 import CapsuleSwitch from '@/components/CapsuleSwitch';
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
+
+import { getScrollTop } from '@/hooks/useHideOnScroll';
 
 type LibrarySourceType = 'openlist' | 'emby' | 'xiaoya' | `emby:${string}` | `emby_${string}`;
 
@@ -105,10 +112,51 @@ export default function PrivateLibraryPage() {
   const scrollLeftRef = useRef(0);
   const isInitializedRef = useRef(false);
   const hasRestoredViewRef = useRef(false);
+  // 返回列表时的快照恢复：非空期间跳过各「重置」effect 与首屏请求
+  const restoringRef = useRef<PrivateLibrarySnapshot<Video> | null>(null);
+  const [restoreTick, setRestoreTick] = useState(0);
+  // 已完整加载的页数（快照只记录已加载完成的页，避免恢复后漏页）
+  const loadedPageRef = useRef(0);
+  const gridRef = useRef<HTMLDivElement>(null);
 
   // 客户端挂载标记
   useEffect(() => {
     setMounted(true);
+  }, []);
+
+  // 挂载时尝试用 sessionStorage 快照恢复列表（须在其它 effect 之前声明）
+  useEffect(() => {
+    const urlSource = searchParams.get('source');
+    const parsed = parseSourceParam(urlSource);
+    const effectiveSource: LibrarySourceType =
+      !runtimeConfig.OPENLIST_ENABLED && runtimeConfig.EMBY_ENABLED
+        ? 'emby'
+        : parsed.sourceType;
+    if (effectiveSource !== 'openlist' && effectiveSource !== 'emby') return;
+
+    const snap = readPrivateLibrarySnapshot<Video>(urlSource || effectiveSource);
+    if (!snap || snap.sourceType !== effectiveSource) return;
+    if (parsed.embyKey && snap.embyKey !== parsed.embyKey) return;
+    const urlView = searchParams.get('view');
+    if (effectiveSource === 'emby' && urlView && urlView !== snap.selectedView) return;
+
+    restoringRef.current = snap;
+    hasRestoredViewRef.current = true;
+    if (snap.embyKey) setEmbyKey(snap.embyKey);
+    setSelectedView(snap.selectedView);
+    setSortBy(snap.sortBy);
+    setSortOrder(snap.sortOrder);
+    setOpenlistCategory(snap.openlistCategory);
+    setOpenlistCategories(snap.openlistCategories);
+    setVideos(snap.videos);
+    setPage(snap.page);
+    loadedPageRef.current = snap.page;
+    setHasMore(snap.hasMore);
+    setError('');
+    setLoading(false);
+    setLoadingMore(false);
+    setRestoreTick((t) => t + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -211,6 +259,7 @@ export default function PrivateLibraryPage() {
   // 切换源类型时重置所有状态（但不在初始化时执行）
   useEffect(() => {
     if (!isInitializedRef.current) return;
+    if (restoringRef.current) return;
 
     setPage(1);
     setVideos([]);
@@ -226,6 +275,7 @@ export default function PrivateLibraryPage() {
   // 切换分类时重置状态（但不在初始化时执行）
   useEffect(() => {
     if (!isInitializedRef.current) return;
+    if (restoringRef.current) return;
 
     setPage(1);
     setVideos([]);
@@ -239,6 +289,7 @@ export default function PrivateLibraryPage() {
   // 切换 OpenList 分类时重置状态
   useEffect(() => {
     if (!isInitializedRef.current) return;
+    if (restoringRef.current) return;
     if (sourceType !== 'openlist') return;
 
     setPage(1);
@@ -253,6 +304,7 @@ export default function PrivateLibraryPage() {
   // 切换排序时重置状态（但不在初始化时执行）
   useEffect(() => {
     if (!isInitializedRef.current) return;
+    if (restoringRef.current) return;
     if (sourceType !== 'emby') return;
 
     setPage(1);
@@ -434,6 +486,9 @@ export default function PrivateLibraryPage() {
 
   // 加载数据的函数
   useEffect(() => {
+    // 快照恢复中：已加载的分页直接来自快照，不重复请求
+    if (restoringRef.current) return;
+
     const fetchVideos = async () => {
       const isInitial = page === 1;
 
@@ -515,6 +570,7 @@ export default function PrivateLibraryPage() {
             } else {
               setVideos((prev) => [...prev, ...newVideos]);
             }
+            loadedPageRef.current = page;
 
             // 检查是否还有更多数据
             const currentPage = data.page || page;
@@ -555,6 +611,143 @@ export default function PrivateLibraryPage() {
       }
     };
   }, [sourceType, embyKey, page, selectedView, xiaoyaPath, runtimeConfig, sortBy, sortOrder, openlistCategory]);
+
+  // ---------------------------------------------------------------------------
+  // 列表快照：保存（点进详情前 / 滚动停止后 / 页面隐藏）与恢复后的滚动定位
+  // ---------------------------------------------------------------------------
+  // 快照恢复后正在把滚动位置拉回目标期间为 true，此时不保存（避免把 0 写回快照）
+  const scrollRestoringRef = useRef(false);
+  const snapshotSourceKey =
+    sourceType === 'emby' && embyKey && embySourceOptions.length > 1
+      ? `emby:${embyKey}`
+      : sourceType;
+  const latestListStateRef = useRef({
+    snapshotSourceKey,
+    sourceType,
+    embyKey,
+    selectedView,
+    sortBy,
+    sortOrder,
+    openlistCategory,
+    openlistCategories,
+    videos,
+    hasMore,
+    loading,
+    error,
+  });
+  latestListStateRef.current = {
+    snapshotSourceKey,
+    sourceType,
+    embyKey,
+    selectedView,
+    sortBy,
+    sortOrder,
+    openlistCategory,
+    openlistCategories,
+    videos,
+    hasMore,
+    loading,
+    error,
+  };
+
+  const saveListSnapshot = useCallback(() => {
+    if (restoringRef.current || scrollRestoringRef.current) return;
+    const st = latestListStateRef.current;
+    if (st.sourceType !== 'openlist' && st.sourceType !== 'emby') return;
+    if (st.loading || st.error || st.videos.length === 0) return;
+    if (loadedPageRef.current < 1) return;
+    // 已离开本页（DOM 已被替换）时不再保存，避免记录到新页面的滚动位置
+    if (!gridRef.current?.isConnected) return;
+    writePrivateLibrarySnapshot<Video>(st.snapshotSourceKey, {
+      savedAt: Date.now(),
+      sourceType: st.sourceType,
+      embyKey: st.embyKey,
+      selectedView: st.selectedView,
+      sortBy: st.sortBy,
+      sortOrder: st.sortOrder,
+      openlistCategory: st.openlistCategory,
+      openlistCategories: st.openlistCategories,
+      videos: st.videos,
+      page: loadedPageRef.current,
+      hasMore: st.hasMore,
+      scrollTop: getScrollTop(),
+    });
+  }, []);
+
+  // 滚动停止 200ms 后保存；页面隐藏时保存
+  useEffect(() => {
+    let timer = 0;
+    const onScroll = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = 0;
+        saveListSnapshot();
+      }, 200);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    document.body.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('pagehide', saveListSnapshot);
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      window.removeEventListener('scroll', onScroll);
+      document.body.removeEventListener('scroll', onScroll);
+      window.removeEventListener('pagehide', saveListSnapshot);
+    };
+  }, [saveListSnapshot]);
+
+  // 快照恢复后：结束恢复状态，并把滚动位置拉回（滚动容器是 document.body，兼容 window）
+  // 须声明在「重置」effect 与数据加载 effect 之后：同一次提交里它们先看到 restoringRef 而跳过
+  useEffect(() => {
+    if (restoreTick === 0) return;
+    const snap = restoringRef.current;
+    restoringRef.current = null;
+    if (!snap) return;
+
+    const target = snap.scrollTop;
+    let rafId = 0;
+    let frames = 0;
+    let stableFrames = 0;
+    let cancelled = false;
+    const stop = () => {
+      cancelled = true;
+      scrollRestoringRef.current = false;
+      if (rafId) window.cancelAnimationFrame(rafId);
+      rafId = 0;
+    };
+    // 用户主动滚动时立即停止，不与用户抢滚动
+    const onUserScroll = () => stop();
+    window.addEventListener('wheel', onUserScroll, { passive: true });
+    window.addEventListener('touchstart', onUserScroll, { passive: true });
+    window.addEventListener('keydown', onUserScroll);
+
+    const apply = () => {
+      rafId = 0;
+      if (cancelled) return;
+      frames++;
+      if (Math.abs(getScrollTop() - target) > 2) {
+        stableFrames = 0;
+        document.body.scrollTop = target;
+        document.documentElement.scrollTop = target;
+      } else {
+        stableFrames++;
+      }
+      // 连续稳定 10 帧或最多约 1.5s 后结束（期间内容高度可能还在变化）
+      if (stableFrames >= 10 || frames >= 90) {
+        stop();
+        return;
+      }
+      rafId = window.requestAnimationFrame(apply);
+    };
+    scrollRestoringRef.current = true;
+    rafId = window.requestAnimationFrame(apply);
+
+    return () => {
+      stop();
+      window.removeEventListener('wheel', onUserScroll);
+      window.removeEventListener('touchstart', onUserScroll);
+      window.removeEventListener('keydown', onUserScroll);
+    };
+  }, [restoreTick]);
 
   const handleVideoClick = (video: Video) => {
     // 构建source参数
@@ -1134,7 +1327,12 @@ export default function PrivateLibraryPage() {
           </div>
         ) : (
           <>
-            <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
+            <div
+              ref={gridRef}
+              // 点进详情前（捕获阶段，先于 VideoCard 跳转）保存列表快照，返回时恢复
+              onClickCapture={saveListSnapshot}
+              className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
+            >
               {videos.map((video) => {
                 // 构建source参数用于VideoCard
                 // 如果是emby源且有embyKey，使用下划线格式
