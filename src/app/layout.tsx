@@ -365,6 +365,8 @@ export default async function RootLayout({
     NETDISK_TEMP_PLAY_ENABLED: userFeatureAccess.netdisk_temp_play,
     FESTIVE_EFFECT_ENABLED: process.env.FESTIVE_EFFECT_ENABLED === 'true',
     HIDE_DOUBAN_NAV: process.env.HIDE_DOUBAN_NAV === '1',
+    OPENLIST_EPISODE_TITLE_FROM_FILENAME:
+      process.env.OPENLIST_EPISODE_TITLE_FROM_FILENAME === '1',
     RATE_BADGE_STYLE: rateBadgeStyle,
   };
 

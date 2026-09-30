@@ -41,6 +41,15 @@ function getEpisodeDisplayLabel(
   if (!title) {
     return String(episodeNumber);
   }
+  // OPENLIST_EPISODE_TITLE_FROM_FILENAME=1：录播分集标题 `06-23 00:10 标题 P1` 显示为 `06-23 00:10 P1`
+  // （完整标题长按/右键查看）；否则下方规则会把开头的月份当成集数
+  if (
+    typeof window !== 'undefined' &&
+    (window as any).RUNTIME_CONFIG?.OPENLIST_EPISODE_TITLE_FROM_FILENAME
+  ) {
+    const recMatch = title.match(/^(\d{2}-\d{2} \d{2}:\d{2}).*?( P\d+)?$/);
+    return recMatch ? recMatch[1] + (recMatch[2] || '') : title;
+  }
   // OVA 单独展示
   const ovaMatch = title.match(/OVA\s*(\d+(?:\.\d+)?)/i);
   if (ovaMatch) {

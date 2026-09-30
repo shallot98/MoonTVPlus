@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getAvailableApiSites, getCacheTime, getConfig } from '@/lib/config';
+import {
+  buildFilenameEpisodes,
+  isEpisodeTitleFromFilename,
+  meetsMinVideoSize,
+} from '@/lib/openlist-env-options';
 import { getDetailFromApi } from '@/lib/downstream';
 import {
   executeSavedSourceScript,
@@ -157,7 +162,8 @@ export async function GET(request: NextRequest) {
       const videoExtensions = ['.mp4', '.mkv', '.avi', '.m3u8', '.flv', '.ts', '.mov', '.wmv', '.webm', '.rmvb', '.rm', '.mpg', '.mpeg', '.3gp', '.f4v', '.m4v', '.vob'];
       const videoFiles = allFiles.filter((item) => {
         if (item.is_dir || item.name.startsWith('.') || item.name.endsWith('.json')) return false;
-        return videoExtensions.some(ext => item.name.toLowerCase().endsWith(ext));
+        // OPENLIST_MIN_VIDEO_MB：过滤过小的碎片文件
+        return videoExtensions.some(ext => item.name.toLowerCase().endsWith(ext)) && meetsMinVideoSize(item);
       });
 
       if (!videoInfo) {
@@ -184,7 +190,10 @@ export async function GET(request: NextRequest) {
       );
       const hasMultipleSeasons = parsedSeasons.size > 1;
 
-      const episodes = videoFiles
+      // OPENLIST_EPISODE_TITLE_FROM_FILENAME=1：标题取文件名、按文件名排序
+      const episodes = isEpisodeTitleFromFilename()
+        ? buildFilenameEpisodes(videoFiles)
+        : videoFiles
         .map((file, index) => {
           const parsed = parseVideoFileName(file.name);
           let episodeInfo;
