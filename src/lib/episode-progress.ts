@@ -302,6 +302,43 @@ export function pruneLocalEpisodeProgressStorage(
   });
 }
 
+/**
+ * 分集被删除后同步本地单集进度：删除该集记录，后续集数的索引整体前移一位，
+ * 避免进度（按 0 基索引存储）错配到相邻分集。
+ */
+export function removeLocalEpisodeProgressIndex(
+  contentKey: string | null,
+  removedIndex: number
+) {
+  if (!isBrowser() || !contentKey || removedIndex < 0) {
+    return;
+  }
+
+  const currentStore = readEpisodeProgressStore(contentKey);
+  if (!currentStore) {
+    return;
+  }
+
+  const episodes: Record<string, LocalEpisodeProgressRecord> = {};
+  for (const [indexKey, record] of Object.entries(currentStore.episodes)) {
+    const index = Number(indexKey);
+    if (!Number.isInteger(index) || index === removedIndex) {
+      continue;
+    }
+    episodes[String(index > removedIndex ? index - 1 : index)] = record;
+  }
+
+  const key = getEpisodeProgressStorageKey(contentKey);
+  if (Object.keys(episodes).length === 0) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(
+    key,
+    JSON.stringify({ updatedAt: Date.now(), episodes })
+  );
+}
+
 export function saveLocalEpisodeProgress(
   contentKey: string | null,
   episodeIndex: number,

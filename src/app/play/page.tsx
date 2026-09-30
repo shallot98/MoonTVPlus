@@ -2,7 +2,7 @@
 
 'use client';
 
-import { AlertCircle, ArrowLeft, Cloud, FileText, Heart, Keyboard, Link2, Loader2, Play, RefreshCw, Router, Search, Sparkles, Star, Users, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Cloud, FileText, Heart, Keyboard, Link2, Loader2, Play, RefreshCw, Router, Search, Sparkles, Star, Trash2, Users, X } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Suspense,
@@ -52,6 +52,7 @@ import {
 } from '@/lib/episode-title-correction';
 import {
   deleteFavorite,
+  deletePlayRecord,
   deleteSkipConfig,
   generateStorageKey,
   getAllPlayRecords,
@@ -71,7 +72,9 @@ import { appendSpecialSourceParam, isSpecialSourcesEnabledOnDevice } from '@/lib
 import {
   buildEpisodeProgressContentKey,
   loadLocalEpisodeProgress,
+  loadLocalEpisodeProgressRecord,
   pruneLocalEpisodeProgressStorage,
+  removeLocalEpisodeProgressIndex,
   saveLocalEpisodeProgress,
 } from '@/lib/episode-progress';
 import { isNetdiskSource, normalizeNetdiskSource } from '@/lib/netdisk/source';
@@ -100,6 +103,7 @@ import {
 import AIChatPanel from '@/components/AIChatPanel';
 import AIComments from '@/components/AIComments';
 import CorrectDialog from '@/components/CorrectDialog';
+import DeleteEpisodeDialog from '@/components/DeleteEpisodeDialog';
 import DanmakuFilterSettings from '@/components/DanmakuFilterSettings';
 import DetailPanel from '@/components/DetailPanel';
 import DoubanComments from '@/components/DoubanComments';
@@ -745,6 +749,17 @@ function PlayPageClient() {
   const [currentSearchKeyword, setCurrentSearchKeyword] = useState<string>(''); // 当前搜索使用的关键词
   const [toast, setToast] = useState<ToastProps | null>(null);
   const [isTranscoding, setIsTranscoding] = useState(false);
+  // 私人影库（OpenList）删除本集：弹窗目标（打开时锁定当前分集）、请求状态与错误
+  const [deleteEpisodeTarget, setDeleteEpisodeTarget] = useState<{
+    folder: string;
+    fileName: string;
+    episodeIndex: number;
+    episodeTitle: string;
+    anchorName: string;
+  } | null>(null);
+  const [isDeletingEpisode, setIsDeletingEpisode] = useState(false);
+  const [deleteEpisodeError, setDeleteEpisodeError] = useState<string | null>(null);
+  const deleteDialogWasPlayingRef = useRef(false);
 
   useEffect(() => {
     danmakuSettingsRef.current = danmakuSettings;
@@ -6373,6 +6388,247 @@ function PlayPageClient() {
   };
 
   // ---------------------------------------------------------------------------
+  // 私人影库（OpenList）删除本集
+  // ---------------------------------------------------------------------------
+  const openListDeleteAllowed =
+    typeof window !== 'undefined' &&
+    (window as any).RUNTIME_CONFIG?.OPENLIST_ALLOW_DELETE === true;
+  const canDeleteCurrentEpisode =
+    openListDeleteAllowed &&
+    hasOfflinePermission &&
+    !isDirectPlay &&
+    detail?.source === 'openlist' &&
+    !!parseOpenListEpisodeUrl(detail.episodes?.[currentEpisodeIndex]) &&
+    !playSync.shouldDisableControls;
+
+  const openDeleteEpisodeDialog = () => {
+    const d = detailRef.current;
+    const idx = currentEpisodeIndexRef.current;
+    const parsed =
+      d?.source === 'openlist'
+        ? parseOpenListEpisodeUrl(d.episodes?.[idx])
+        : null;
+    if (!d || !parsed) {
+      setToast({
+        message: '无法识别当前分集对应的文件',
+        type: 'error',
+        onClose: () => setToast(null),
+      });
+      return;
+    }
+
+    // 弹窗期间暂停，避免自动切到下一集导致确认对象与正在播放的不一致
+    const player = artPlayerRef.current;
+    deleteDialogWasPlayingRef.current = !!player && !player.paused;
+    if (deleteDialogWasPlayingRef.current) {
+      try {
+        player.pause();
+      } catch (err) {
+        console.warn('[DeleteEpisode] 暂停播放失败:', err);
+      }
+    }
+
+    setDeleteEpisodeError(null);
+    setDeleteEpisodeTarget({
+      ...parsed,
+      episodeIndex: idx,
+      episodeTitle: d.episodes_titles?.[idx] || `第 ${idx + 1} 集`,
+      anchorName: videoTitleRef.current || d.title || '',
+    });
+  };
+
+  const closeDeleteEpisodeDialog = () => {
+    if (isDeletingEpisode) return;
+    setDeleteEpisodeTarget(null);
+    setDeleteEpisodeError(null);
+    if (deleteDialogWasPlayingRef.current && artPlayerRef.current) {
+      deleteDialogWasPlayingRef.current = false;
+      try {
+        artPlayerRef.current.play();
+      } catch (err) {
+        console.warn('[DeleteEpisode] 恢复播放失败:', err);
+      }
+    }
+  };
+
+  const handleConfirmDeleteEpisode = async () => {
+    const target = deleteEpisodeTarget;
+    const d = detailRef.current;
+    if (!target || !d || isDeletingEpisode) return;
+
+    setIsDeletingEpisode(true);
+    setDeleteEpisodeError(null);
+
+    let result: {
+      success?: boolean;
+      error?: string;
+      details?: string;
+      warning?: string;
+      folderRemoved?: boolean;
+    } = {};
+    try {
+      const response = await fetch('/api/openlist/delete-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          folder: target.folder,
+          fileName: target.fileName,
+        }),
+      });
+      result = (await response.json().catch(() => null)) || {};
+      if (!response.ok || !result.success) {
+        const message = result.error || `请求失败（HTTP ${response.status}）`;
+        throw new Error(
+          result.details ? `${message}（${result.details}）` : message
+        );
+      }
+    } catch (err) {
+      setDeleteEpisodeError(err instanceof Error ? err.message : String(err));
+      setIsDeletingEpisode(false);
+      return;
+    }
+
+    // 文件已删除：本地单集进度（按 0 基索引存储）同步前移，避免错配到相邻分集
+    try {
+      removeLocalEpisodeProgressIndex(
+        episodeProgressContentKey,
+        target.episodeIndex
+      );
+    } catch (err) {
+      console.warn('[DeleteEpisode] 同步本地单集进度失败:', err);
+    }
+
+    const source = currentSourceRef.current;
+    const id = currentIdRef.current;
+    const oldEpisodes = d.episodes || [];
+    const deletedUrl = oldEpisodes[target.episodeIndex];
+    // 原位置的下一集；删的是最后一集则取上一集
+    const preferredUrl =
+      oldEpisodes[target.episodeIndex + 1] ??
+      oldEpisodes[target.episodeIndex - 1];
+
+    // 重新拉取详情；失败时退回本地列表（并在提示里说明）
+    let newDetail: SearchResult = { ...d };
+    let refreshError = '';
+    if (!result.folderRemoved) {
+      try {
+        const res = await fetch(
+          appendSpecialSourceParam(
+            `/api/source-detail?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}&title=${encodeURIComponent(videoTitleRef.current || d.title || '')}`
+          )
+        );
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !Array.isArray(data.episodes)) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
+        newDetail = data as SearchResult;
+      } catch (err) {
+        refreshError = err instanceof Error ? err.message : String(err);
+      }
+      // 列表里仍有已删除分集（详情拉取失败，或 OpenList 目录缓存未更新）时本地剔除
+      const staleIndex = deletedUrl ? newDetail.episodes.indexOf(deletedUrl) : -1;
+      if (staleIndex >= 0) {
+        newDetail = {
+          ...newDetail,
+          episodes: newDetail.episodes.filter((_, i) => i !== staleIndex),
+          episodes_titles: (newDetail.episodes_titles || []).filter(
+            (_, i) => i !== staleIndex
+          ),
+        };
+      }
+    }
+
+    const newEpisodes = newDetail.episodes || [];
+    if (result.folderRemoved || newEpisodes.length === 0) {
+      // 该主播已无分集：播放记录无处可指，直接删除后返回私人影库
+      try {
+        await deletePlayRecord(source, id);
+      } catch (err) {
+        console.warn('[DeleteEpisode] 删除播放记录失败:', err);
+      }
+      deleteDialogWasPlayingRef.current = false;
+      setDeleteEpisodeTarget(null);
+      setIsDeletingEpisode(false);
+      setToast({
+        message: '已删除，该主播已无分集，即将返回私人影库',
+        type: 'success',
+        onClose: () => setToast(null),
+      });
+      window.setTimeout(() => router.push('/private-library'), 1200);
+      return;
+    }
+
+    let targetIndex = preferredUrl ? newEpisodes.indexOf(preferredUrl) : -1;
+    if (targetIndex < 0) {
+      targetIndex = Math.min(target.episodeIndex, newEpisodes.length - 1);
+    }
+
+    // 播放记录改指向新的当前集（避免指向越界或已删除的分集）
+    try {
+      const records = await getAllPlayRecords();
+      const existing = records[generateStorageKey(source, id)];
+      if (existing) {
+        const progress = loadLocalEpisodeProgressRecord(
+          episodeProgressContentKey,
+          targetIndex
+        );
+        await savePlayRecord(source, id, {
+          ...existing,
+          index: targetIndex + 1,
+          total_episodes: newEpisodes.length,
+          play_time: progress?.playTime || 0,
+          total_time: progress?.totalTime || 0,
+          save_time: Date.now(),
+        });
+      }
+    } catch (err) {
+      console.warn('[DeleteEpisode] 更新播放记录失败:', err);
+    }
+
+    const finalDetail = newDetail;
+    if (targetIndex !== currentEpisodeIndexRef.current) {
+      suppressPlayRecordJumpOnNextEpisodeChangeRef.current = true;
+    }
+    resumeTimeRef.current = loadLocalEpisodeProgress(
+      episodeProgressContentKey,
+      targetIndex
+    );
+    setVideoLoadingStage('episodeChanging');
+    setIsVideoLoading(true);
+    setVideoError(null);
+    detailRef.current = finalDetail;
+    currentEpisodeIndexRef.current = targetIndex;
+    setAvailableSources((prev) =>
+      prev.map((s) =>
+        s.source === finalDetail.source && s.id === finalDetail.id
+          ? finalDetail
+          : s
+      )
+    );
+    setDetail(finalDetail);
+    setCurrentEpisodeIndex(targetIndex);
+    // URL 带 episode 参数时同步，避免「URL → 集数」的 effect 把索引改回去
+    if (searchParams.get('episode')) {
+      const nextUrl = new URL(window.location.href);
+      nextUrl.searchParams.set('episode', String(targetIndex + 1));
+      window.history.replaceState({}, '', nextUrl.toString());
+    }
+
+    deleteDialogWasPlayingRef.current = false;
+    setDeleteEpisodeTarget(null);
+    setIsDeletingEpisode(false);
+    setToast({
+      message: refreshError
+        ? `已删除，但重新拉取分集列表失败（已按本地列表更新）：${refreshError}`
+        : result.warning
+          ? `已删除（${result.warning}）`
+          : '已删除',
+      type: refreshError || result.warning ? 'info' : 'success',
+      onClose: () => setToast(null),
+    });
+  };
+
+  // ---------------------------------------------------------------------------
   // 弹幕处理函数
   // ---------------------------------------------------------------------------
 
@@ -10814,6 +11070,21 @@ function PlayPageClient() {
                 {playbackSourceBadge === 'local' ? '本地播放' : '离线播放'}
               </span>
             )}
+            {/* 删除本集：仅私人影库（OpenList）+ OPENLIST_ALLOW_DELETE + 站长/管理员 */}
+            {canDeleteCurrentEpisode && (
+              <button
+                type='button'
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openDeleteEpisodeDialog();
+                }}
+                className='inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-red-300 text-red-600 bg-white/80 hover:bg-red-50 dark:border-red-700 dark:text-red-300 dark:bg-gray-800/80 dark:hover:bg-red-900/30 transition-colors'
+                title='从 OpenList 删除当前分集文件'
+              >
+                <Trash2 className='w-3.5 h-3.5' aria-hidden='true' />
+                <span className='whitespace-nowrap'>删除本集</span>
+              </button>
+            )}
           </h1>
         </div>
         {/* 第二行：播放器和选集 */}
@@ -11936,6 +12207,17 @@ function PlayPageClient() {
       {/* Toast通知 */}
       {toast && <Toast {...toast} />}
 
+      <DeleteEpisodeDialog
+        isOpen={!!deleteEpisodeTarget}
+        anchorName={deleteEpisodeTarget?.anchorName || ''}
+        episodeTitle={deleteEpisodeTarget?.episodeTitle || ''}
+        fileName={deleteEpisodeTarget?.fileName || ''}
+        isDeleting={isDeletingEpisode}
+        error={deleteEpisodeError}
+        onConfirm={handleConfirmDeleteEpisode}
+        onCancel={closeDeleteEpisodeDialog}
+      />
+
       <input
         ref={customSubtitleInputRef}
         type='file'
@@ -12209,6 +12491,18 @@ function PlayPageClient() {
     </PageLayout>
   );
 }
+
+// 解析私人影库分集地址 /api/openlist/play?folder=...&fileName=...
+// 与服务端 play 路由相同的 URLSearchParams 解码，保证删除的就是正在播放的文件
+const parseOpenListEpisodeUrl = (
+  url?: string
+): { folder: string; fileName: string } | null => {
+  if (!url || !url.startsWith('/api/openlist/play?')) return null;
+  const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+  const folder = params.get('folder');
+  const fileName = params.get('fileName');
+  return folder && fileName ? { folder, fileName } : null;
+};
 
 // 从 localStorage 读取小雅源的纠错信息
 const getXiaoyaCorrection = (source: string, id: string) => {

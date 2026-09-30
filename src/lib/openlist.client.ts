@@ -286,6 +286,38 @@ export class OpenListClient {
     }
   }
 
+  /**
+   * 删除目录下的指定条目，返回 OpenList 原始 JSON（{ code, message }）。
+   * 与 deleteFile 不同：HTTP 非 2xx 直接抛错（带响应体），JSON code 交由调用方判定，
+   * 因为 OpenList 常以 HTTP 200 + JSON code 表示错误。
+   * 注意：OpenList 对不存在的文件同样返回 code 200，调用方需自行前后校验。
+   */
+  async removeEntries(
+    dir: string,
+    names: string[]
+  ): Promise<{ code: number; message: string }> {
+    const response = await this.fetchWithRetry(`${this.baseURL}/api/fs/remove`, {
+      method: 'POST',
+      headers: await this.getHeaders(),
+      body: JSON.stringify({ dir, names }),
+    });
+
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(
+        `OpenList fs/remove HTTP ${response.status}: ${text.slice(0, 300)}`
+      );
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(
+        `OpenList fs/remove 返回非 JSON 响应: ${text.slice(0, 300)}`
+      );
+    }
+  }
+
   // 获取视频预览流
   async getVideoPreview(path: string): Promise<any> {
     const response = await this.fetchWithRetry(`${this.baseURL}/api/fs/other`, {

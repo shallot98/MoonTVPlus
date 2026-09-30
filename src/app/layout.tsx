@@ -367,6 +367,7 @@ export default async function RootLayout({
     HIDE_DOUBAN_NAV: process.env.HIDE_DOUBAN_NAV === '1',
     OPENLIST_EPISODE_TITLE_FROM_FILENAME:
       process.env.OPENLIST_EPISODE_TITLE_FROM_FILENAME === '1',
+    OPENLIST_ALLOW_DELETE: process.env.OPENLIST_ALLOW_DELETE === '1',
     RATE_BADGE_STYLE: rateBadgeStyle,
   };
 
