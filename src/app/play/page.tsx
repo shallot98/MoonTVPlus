@@ -92,6 +92,11 @@ import {
   convertSubtitleFileToVttObjectUrl,
   CUSTOM_SUBTITLE_ACCEPT,
 } from '@/lib/subtitle-converter';
+import {
+  findOpenListSegmentIndex,
+  makeOpenListSegmentFavoriteId,
+  parseOpenListEpisodeUrl,
+} from '@/lib/openlist-segment-favorite';
 import { clearPrivateLibrarySnapshots } from '@/lib/private-library-snapshot';
 import { getTMDBImageUrl } from '@/lib/tmdb.search';
 import { DanmakuFilterConfig, EpisodeFilterConfig, SearchResult } from '@/lib/types';
@@ -766,6 +771,11 @@ function PlayPageClient() {
     { name: string; error: string }[]
   >([]);
   const deleteDialogWasPlayingRef = useRef(false);
+  const [streamerDeletePreview, setStreamerDeletePreview] = useState<{ fileNames: string[] } | null>(null);
+  const [isLoadingStreamerDelete, setIsLoadingStreamerDelete] = useState(false);
+  const [streamerDeleteError, setStreamerDeleteError] = useState<string | null>(null);
+  const streamerPreviewRequestRef = useRef(0);
+  const deleteRequestRef = useRef(false);
   // 整场删除部分失败时，关闭弹窗后再执行的刷新/切集
   const pendingPostDeleteRef = useRef<PostDeleteInfo | null>(null);
 
@@ -860,6 +870,10 @@ function PlayPageClient() {
   const [currentSource, setCurrentSource] = useState(normalizeNetdiskSource(searchParams.get('source')) || '');
   const [currentId, setCurrentId] = useState(searchParams.get('id') || '');
   const [fileName] = useState(searchParams.get('fileName') || ''); // 小雅源：用户点击的文件名
+  const requestedSegment = useRef({
+    folder: searchParams.get('segmentFolder') || '',
+    fileName: searchParams.get('segmentFileName') || '',
+  }).current;
   const isDirectPlay = currentSource === 'directplay';
 
   useEffect(() => {
@@ -5669,7 +5683,7 @@ function PlayPageClient() {
           (source) => source.source === currentSource && source.id === currentId
         );
 
-        if (cachedTarget?.episodes?.length) {
+        if (cachedTarget?.episodes?.length && !requestedSegment.fileName) {
           detailData = cachedTarget;
           sourcesInfo = cachedSources;
           setAvailableSources(cachedSources);
@@ -5803,6 +5817,21 @@ function PlayPageClient() {
         }
       }
 
+      let requestedSegmentIndex: number | null = null;
+      if (requestedSegment.folder || requestedSegment.fileName) {
+        requestedSegmentIndex = detailData.source === 'openlist'
+          ? findOpenListSegmentIndex(detailData.episodes || [], requestedSegment.folder, requestedSegment.fileName)
+          : -1;
+        if (requestedSegmentIndex < 0) {
+          setError('收藏的录屏分段已不存在或不可播放，请返回收藏列表取消该收藏');
+          setLoading(false);
+          return;
+        }
+        detailData = { ...detailData, initialEpisodeIndex: requestedSegmentIndex };
+        setCurrentEpisodeIndex(requestedSegmentIndex);
+        currentEpisodeIndexRef.current = requestedSegmentIndex;
+      }
+
       setNeedPrefer(false);
       // 直接使用 detailData.source（已经是完整格式）
       setCurrentSource(detailData.source);
@@ -5829,7 +5858,7 @@ function PlayPageClient() {
 
       setDetail(detailData);
       setSourceProxyMode(detailData.proxyMode || false); // 从 detail 数据中读取代理模式
-      if (currentEpisodeIndex >= detailData.episodes.length) {
+      if (requestedSegmentIndex === null && currentEpisodeIndex >= detailData.episodes.length) {
         setCurrentEpisodeIndex(0);
       }
 
@@ -5924,6 +5953,13 @@ function PlayPageClient() {
         }
       } catch (err) {
         console.error('读取播放记录失败:', err);
+      }
+
+      // 分段收藏优先于历史续播，历史下标可能因删段/重排而指向其他文件。
+      if (requestedSegmentIndex !== null) {
+        setCurrentEpisodeIndex(requestedSegmentIndex);
+        currentEpisodeIndexRef.current = requestedSegmentIndex;
+        resumeTimeRef.current = 0;
       }
 
       // 短暂延迟让用户看到完成状态
@@ -6494,6 +6530,10 @@ function PlayPageClient() {
     }
 
     pendingPostDeleteRef.current = null;
+    streamerPreviewRequestRef.current++;
+    setStreamerDeletePreview(null);
+    setStreamerDeleteError(null);
+    setIsLoadingStreamerDelete(false);
     setDeleteEpisodeError(null);
     setDeleteFailedFiles([]);
     setDeleteEpisodeTarget({
@@ -6503,6 +6543,34 @@ function PlayPageClient() {
       anchorName: videoTitleRef.current || d.title || '',
       ...buildDeleteBroadcastOption(d, idx, parsed.folder),
     });
+  };
+
+  const previewStreamerDelete = async () => {
+    const target = deleteEpisodeTarget;
+    if (!target || deleteRequestRef.current) return;
+    const requestId = ++streamerPreviewRequestRef.current;
+    setStreamerDeletePreview(null);
+    setStreamerDeleteError(null);
+    setDeleteEpisodeError(null);
+    setIsLoadingStreamerDelete(true);
+    try {
+      const response = await fetch('/api/openlist/delete-streamer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'preview', folder: target.folder }),
+      });
+      const result = await response.json();
+      if (!response.ok || !Array.isArray(result.fileNames)) {
+        throw new Error(result.error || `请求失败（HTTP ${response.status}）`);
+      }
+      if (requestId === streamerPreviewRequestRef.current) setStreamerDeletePreview(result);
+    } catch (err) {
+      if (requestId === streamerPreviewRequestRef.current) {
+        setStreamerDeleteError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (requestId === streamerPreviewRequestRef.current) setIsLoadingStreamerDelete(false);
+    }
   };
 
   /**
@@ -6613,8 +6681,12 @@ function PlayPageClient() {
       setDeleteFailedFiles([]);
       setIsDeletingEpisode(false);
       setToast({
-        message: '已删除，该主播已无分集，即将返回私人影库',
-        type: 'success',
+        message: info.partialError
+          ? `部分删除：${info.partialError}；已无可播放分段，即将返回私人影库`
+          : info.warning
+            ? `视频已删除，但${info.warning}；即将返回私人影库`
+            : '已删除，该主播已无分集，即将返回私人影库',
+        type: info.partialError ? 'error' : info.warning ? 'info' : 'success',
         onClose: () => setToast(null),
       });
       window.setTimeout(() => router.push('/private-library'), 1200);
@@ -6685,7 +6757,7 @@ function PlayPageClient() {
     const doneText = info.partialError
       ? `部分删除：成功 ${info.deletedFileNames.length} 个，${info.partialError}`
       : info.deletedFileNames.length > 1
-        ? `已删除本场 ${info.deletedFileNames.length} 个文件`
+        ? `已删除 ${info.deletedFileNames.length} 个视频`
         : '已删除';
     setToast({
       message: refreshError
@@ -6703,7 +6775,8 @@ function PlayPageClient() {
   };
 
   const closeDeleteEpisodeDialog = () => {
-    if (isDeletingEpisode) return;
+    if (isDeletingEpisode || deleteRequestRef.current) return;
+    streamerPreviewRequestRef.current++;
     // 整场删除部分失败：关闭时再刷新列表（已删除的文件不能留在选集里）
     const pending = pendingPostDeleteRef.current;
     if (pending) {
@@ -6724,13 +6797,14 @@ function PlayPageClient() {
     }
   };
 
-  const handleConfirmDeleteEpisode = async (scope: DeleteScope) => {
+  const performDeleteEpisode = async (scope: DeleteScope) => {
     const target = deleteEpisodeTarget;
     const d = detailRef.current;
-    if (!target || !d || isDeletingEpisode || pendingPostDeleteRef.current) {
+    if (!target || !d || isDeletingEpisode || (pendingPostDeleteRef.current && scope !== 'streamer')) {
       return;
     }
     if (scope === 'broadcast' && !target.broadcast) return;
+    if (scope === 'streamer' && (isLoadingStreamerDelete || streamerDeleteError || !streamerDeletePreview?.fileNames.length)) return;
 
     setIsDeletingEpisode(true);
     setDeleteEpisodeError(null);
@@ -6787,10 +6861,14 @@ function PlayPageClient() {
       serverFileNames?: string[];
     } = {};
     try {
-      response = await fetch('/api/openlist/delete-broadcast', {
+      response = await fetch(scope === 'streamer' ? '/api/openlist/delete-streamer' : '/api/openlist/delete-broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+        body: JSON.stringify(scope === 'streamer' ? {
+          action: 'delete',
+          folder: target.folder,
+          fileNames: streamerDeletePreview!.fileNames,
+        } : {
           folder: target.folder,
           broadcastKey: broadcast.key,
           fileNames: broadcast.fileNames,
@@ -6803,7 +6881,10 @@ function PlayPageClient() {
       return;
     }
 
-    const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+    const deleted = Array.from(new Set([
+      ...(scope === 'streamer' ? pendingPostDeleteRef.current?.deletedFileNames || [] : []),
+      ...(Array.isArray(result.deleted) ? result.deleted : []),
+    ]));
     const failed = Array.isArray(result.failed) ? result.failed : [];
     if (response.ok && result.success) {
       await applyPostDelete({
@@ -6818,7 +6899,8 @@ function PlayPageClient() {
     let message = result.error || `请求失败（HTTP ${response.status}）`;
     if (result.details) message += `（${result.details}）`;
     if (response.status === 409 && Array.isArray(result.serverFileNames)) {
-      message += `\n服务端当前本场 ${result.serverFileNames.length} 个文件，请刷新页面后重试`;
+      message += `\n服务端当前${scope === 'streamer' ? '主播共' : '本场'} ${result.serverFileNames.length} 个文件，请${scope === 'streamer' ? '重新获取列表' : '刷新页面'}后重试`;
+      if (scope === 'streamer') setStreamerDeletePreview(null);
     }
     setDeleteEpisodeError(message);
     setDeleteFailedFiles(failed);
@@ -6833,6 +6915,19 @@ function PlayPageClient() {
       };
     }
     setIsDeletingEpisode(false);
+  };
+
+  const handleConfirmDeleteEpisode = async (scope: DeleteScope) => {
+    if (deleteRequestRef.current) return;
+    deleteRequestRef.current = true;
+    try {
+      await performDeleteEpisode(scope);
+    } catch (err) {
+      setDeleteEpisodeError(err instanceof Error ? err.message : String(err));
+      setIsDeletingEpisode(false);
+    } finally {
+      deleteRequestRef.current = false;
+    }
   };
 
   // ---------------------------------------------------------------------------
@@ -7694,67 +7789,83 @@ function PlayPageClient() {
   // ---------------------------------------------------------------------------
   // 收藏相关
   // ---------------------------------------------------------------------------
-  // 每当 source 或 id 变化时检查收藏状态
+  const favoriteTarget = useMemo(() => {
+    if (!currentSource || !currentId || !detail) return null;
+    if (currentSource !== 'openlist') return { source: currentSource, id: currentId, segment: null };
+    const parsed = parseOpenListEpisodeUrl(detail.episodes?.[currentEpisodeIndex]);
+    if (!parsed) return null;
+    return {
+      source: currentSource,
+      id: makeOpenListSegmentFavoriteId(parsed.folder, parsed.fileName),
+      segment: {
+        ...parsed,
+        contentId: currentId,
+        title: detail.episodes_titles?.[currentEpisodeIndex] || parsed.fileName,
+      },
+    };
+  }, [currentSource, currentId, detail, currentEpisodeIndex]);
+  const favoriteKey = favoriteTarget ? generateStorageKey(favoriteTarget.source, favoriteTarget.id) : '';
+  const favoriteKeyRef = useRef(favoriteKey);
+  favoriteKeyRef.current = favoriteKey;
+  const favoriteRequestRef = useRef(false);
+  const [favoriteBusy, setFavoriteBusy] = useState(false);
+  const [favoriteLoading, setFavoriteLoading] = useState(true);
+
+  // 每个录屏文件独立收藏；异步结果不能覆盖切换后的另一段。
   useEffect(() => {
-    if (!currentSource || !currentId) return;
+    let cancelled = false;
+    let changed = false;
+    setFavorited(false);
+    setFavoriteLoading(true);
+    if (!favoriteTarget) return;
+    const unsubscribe = subscribeToDataUpdates('favoritesUpdated', (favorites: Record<string, any>) => {
+      changed = true;
+      if (!cancelled) setFavorited(!!favorites[favoriteKey]);
+    });
     (async () => {
       try {
-        const fav = await isFavorited(currentSource, currentId);
-        setFavorited(fav);
+        const fav = await isFavorited(favoriteTarget.source, favoriteTarget.id);
+        if (!cancelled && !changed) setFavorited(fav);
       } catch (err) {
-        console.error('检查收藏状态失败:', err);
+        if (!cancelled) setToast({ message: '读取收藏状态失败，请重试', type: 'error', onClose: () => setToast(null) });
+      } finally {
+        if (!cancelled) setFavoriteLoading(false);
       }
     })();
-  }, [currentSource, currentId]);
+    return () => { cancelled = true; unsubscribe(); };
+  }, [favoriteKey]);
 
-  // 监听收藏数据更新事件
-  useEffect(() => {
-    if (!currentSource || !currentId) return;
-
-    const unsubscribe = subscribeToDataUpdates(
-      'favoritesUpdated',
-      (favorites: Record<string, any>) => {
-        const key = generateStorageKey(currentSource, currentId);
-        const isFav = !!favorites[key];
-        setFavorited(isFav);
-      }
-    );
-
-    return unsubscribe;
-  }, [currentSource, currentId]);
-
-  // 切换收藏
   const handleToggleFavorite = async () => {
-    if (
-      !videoTitleRef.current ||
-      !detailRef.current ||
-      !currentSourceRef.current ||
-      !currentIdRef.current
-    )
-      return;
-
+    const target = favoriteTarget;
+    const d = detail;
+    if (!target || !d || favoriteRequestRef.current || favoriteLoading) return;
+    const key = favoriteKey;
+    const nextFavorited = !favorited;
+    favoriteRequestRef.current = true;
+    setFavoriteBusy(true);
     try {
-      if (favorited) {
-        // 如果已收藏，删除收藏
-        await deleteFavorite(currentSourceRef.current, currentIdRef.current);
-        setFavorited(false);
+      if (!nextFavorited) {
+        await deleteFavorite(target.source, target.id);
       } else {
-        // 如果未收藏，添加收藏
-        await saveFavorite(currentSourceRef.current, currentIdRef.current, {
-          title: videoTitleRef.current,
-          source_name: detailRef.current?.source_name || '',
-          year: detailRef.current?.year || 'unknown',
-          cover: detailRef.current?.poster || '',
-          total_episodes: detailRef.current?.episodes.length || 1,
+        await saveFavorite(target.source, target.id, {
+          title: target.segment ? `${videoTitle || d.title} · ${target.segment.title}` : videoTitle || d.title,
+          source_name: d.source_name || '私人影库',
+          year: d.year || 'unknown',
+          cover: d.poster || '',
+          total_episodes: target.segment ? 1 : d.episodes.length || 1,
           save_time: Date.now(),
           search_title: searchTitle,
-          is_completed: getSeriesStatus(detailRef.current) === 'completed',
-          vod_remarks: detailRef.current?.vod_remarks,
+          is_completed: target.segment ? true : getSeriesStatus(d) === 'completed',
+          vod_remarks: target.segment ? '录屏分段' : d.vod_remarks,
+          ...(target.segment ? { segment: target.segment } : {}),
         });
-        setFavorited(true);
       }
+      if (favoriteKeyRef.current === key) setFavorited(nextFavorited);
     } catch (err) {
-      console.error('切换收藏失败:', err);
+      setToast({ message: `收藏操作失败：${err instanceof Error ? err.message : String(err)}`, type: 'error', onClose: () => setToast(null) });
+    } finally {
+      favoriteRequestRef.current = false;
+      setFavoriteBusy(false);
     }
   };
 
@@ -12114,13 +12225,20 @@ function PlayPageClient() {
                       )}
                     </span>
                     <button
+                      type='button'
                       onClick={(e) => {
                         e.stopPropagation();
                         handleToggleFavorite();
                       }}
-                      className='flex-shrink-0 hover:opacity-80 transition-opacity'
+                      disabled={!favoriteTarget || favoriteBusy || favoriteLoading}
+                      title={currentSource === 'openlist' ? (favorited ? '取消收藏本分段' : '收藏本分段') : (favorited ? '取消收藏' : '收藏')}
+                      aria-label={currentSource === 'openlist' ? (favorited ? '取消收藏本分段' : '收藏本分段') : (favorited ? '取消收藏' : '收藏')}
+                      aria-pressed={favorited}
+                      className='flex-shrink-0 -m-2 p-2 rounded-lg hover:opacity-80 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed'
                     >
-                      <FavoriteIcon filled={favorited} />
+                      {currentSource === 'openlist'
+                        ? <Star className={`h-6 w-6 ${favorited ? 'fill-yellow-400 text-yellow-400' : 'text-gray-700 dark:text-gray-300'}`} aria-hidden='true' />
+                        : <FavoriteIcon filled={favorited} />}
                     </button>
                     {/* 网盘搜索按钮 */}
                     {netdiskSearchEnabled && (
@@ -12425,6 +12543,10 @@ function PlayPageClient() {
         broadcast={deleteEpisodeTarget?.broadcast || null}
         broadcastDisabledReason={deleteEpisodeTarget?.broadcastDisabledReason || null}
         broadcastFallbackLabel='删除本场直播'
+        streamer={streamerDeletePreview}
+        isLoadingStreamer={isLoadingStreamerDelete}
+        streamerError={streamerDeleteError}
+        onPreviewStreamer={previewStreamerDelete}
         isDeleting={isDeletingEpisode}
         error={deleteEpisodeError}
         failedFiles={deleteFailedFiles}
@@ -12725,18 +12847,6 @@ interface PostDeleteInfo {
   /** 整场删除部分失败的说明 */
   partialError?: string;
 }
-
-// 解析私人影库分集地址 /api/openlist/play?folder=...&fileName=...
-// 与服务端 play 路由相同的 URLSearchParams 解码，保证删除的就是正在播放的文件
-const parseOpenListEpisodeUrl = (
-  url?: string
-): { folder: string; fileName: string } | null => {
-  if (!url || !url.startsWith('/api/openlist/play?')) return null;
-  const params = new URLSearchParams(url.slice(url.indexOf('?') + 1));
-  const folder = params.get('folder');
-  const fileName = params.get('fileName');
-  return folder && fileName ? { folder, fileName } : null;
-};
 
 // 从 localStorage 读取小雅源的纠错信息
 const getXiaoyaCorrection = (source: string, id: string) => {

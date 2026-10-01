@@ -12,7 +12,7 @@ import { AdminConfig } from '@/lib/admin.types';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
-import { OpenListClient } from '@/lib/openlist.client';
+import { OpenListClient, type OpenListGetResponse } from '@/lib/openlist.client';
 import {
   getCachedMetaInfo,
   invalidateMetaInfoCache,
@@ -250,29 +250,93 @@ export async function resolveDeleteFolder(
   return { config, openListConfig, folderKey, client };
 }
 
-/** 文件夹内的合格分集（扩展名 + OPENLIST_MIN_VIDEO_MB，与详情接口一致），全量分页 */
+/** 文件夹内的视频，全量分页；allVideos 用于主播删除，不能漏掉大小过滤隐藏的录像。 */
 export async function listQualifiedVideos(
   client: OpenListClient,
-  folder: string
+  folder: string,
+  allVideos = false
 ): Promise<{ name: string; size: number }[]> {
   const result: { name: string; size: number }[] = [];
+  const seen = new Set<string>();
   let page = 1;
   const perPage = 100;
   for (;;) {
     const res = await client.listDirectory(folder, page, perPage);
-    if (res.code !== 200) {
+    const emptyDirectory = res.data?.content == null && res.data?.total === 0;
+    if (res.code !== 200 || (!Array.isArray(res.data?.content) && !emptyDirectory)) {
       throw new Error(`列目录失败: ${res.message || res.code}`);
     }
-    const content = res.data?.content || [];
+    const content = res.data.content || [];
     for (const item of content) {
-      if (isQualifiedVideoFile(item)) {
+      if (seen.has(item.name)) throw new Error('目录分页存在重复项，请刷新后重试');
+      seen.add(item.name);
+      if (allVideos
+        ? !item.is_dir && validateFileName(item.name) === null
+        : isQualifiedVideoFile(item)) {
         result.push({ name: item.name, size: item.size || 0 });
       }
     }
-    if (content.length < perPage) break;
+    const hasMore = Number.isFinite(res.data.total) && seen.size < res.data.total;
+    if (content.length === 0 && hasMore) throw new Error('目录分页不完整，请刷新后重试');
+    if (content.length < perPage && !hasMore) break;
     page++;
   }
   return result;
+}
+
+/** 批量删除先全量预检，再逐个删除、复查；任何部分失败都保留文件名及原因。 */
+export async function deleteListedVideos(
+  ctx: DeleteFolderContext,
+  folder: string,
+  fileNames: string[],
+  auth: DeleteAuthInfo,
+  logTag: string
+): Promise<NextResponse | {
+  deleted: string[];
+  failed: { name: string; error: string }[];
+}> {
+  for (const name of fileNames) {
+    let before: OpenListGetResponse;
+    try {
+      before = await ctx.client.getFile(`${folder}/${name}`);
+    } catch (error) {
+      return jsonError(502, '查询文件失败（未删除任何文件）', `${name}: ${(error as Error).message}`);
+    }
+    if (before.code !== 200) {
+      return jsonError(
+        isOpenListNotFound(before.message) ? 409 : 502,
+        '文件状态已变化或查询失败，请刷新后重试（未删除任何文件）',
+        `${name}: ${before.message || before.code}`
+      );
+    }
+    if (!before.data || before.data.is_dir) {
+      return jsonError(409, '目标不是文件（未删除任何文件）', name);
+    }
+  }
+
+  const deleted: string[] = [];
+  const failed: { name: string; error: string }[] = [];
+  for (const name of fileNames) {
+    const path = `${folder}/${name}`;
+    try {
+      const result = await ctx.client.removeEntries(folder, [name]);
+      if (result.code !== 200) throw new Error(`OpenList 删除失败: ${result.message || result.code}`);
+      const after = await ctx.client.getFile(path);
+      if (after.code === 200) throw new Error('OpenList 返回删除成功，但文件仍然存在');
+      if (!isOpenListNotFound(after.message)) {
+        throw new Error(`删除后复查异常: ${after.message || after.code}`);
+      }
+      deleted.push(name);
+      console.log(`[${logTag}] 审计: user=${auth.username} role=${auth.role} 删除文件 ${path}`);
+    } catch (err) {
+      const error = (err as Error).message;
+      failed.push({ name, error });
+      console.error(`[${logTag}] 审计: user=${auth.username} 删除失败 ${path}: ${error}`);
+    }
+  }
+  // 即使复查失败，远端也可能已经删除，必须使详情和直链缓存失效。
+  invalidateDeletedFileCaches(ctx, folder, fileNames.map((name) => `${folder}/${name}`));
+  return { deleted, failed };
 }
 
 /**
@@ -301,7 +365,8 @@ export async function removeFolderIfEmpty(
   ctx: DeleteFolderContext,
   folder: string,
   auth: DeleteAuthInfo,
-  logTag: string
+  logTag: string,
+  allVideos = false
 ): Promise<{
   remainingEpisodes: number | null;
   folderRemoved: boolean;
@@ -311,7 +376,7 @@ export async function removeFolderIfEmpty(
   let folderRemoved = false;
   let warning: string | undefined;
   try {
-    remainingEpisodes = (await listQualifiedVideos(ctx.client, folder)).length;
+    remainingEpisodes = (await listQualifiedVideos(ctx.client, folder, allVideos)).length;
   } catch (error) {
     warning = `文件已删除，但统计剩余分集失败: ${(error as Error).message}`;
     console.error(`[${logTag}]`, warning);

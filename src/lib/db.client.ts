@@ -61,6 +61,7 @@ export interface Favorite {
   origin?: 'vod' | 'live';
   is_completed?: boolean; // 是否已完结
   vod_remarks?: string; // 视频备注信息
+  segment?: import('./openlist-segment-favorite').OpenListSegmentFavorite;
 }
 
 // ---- 音乐播放记录类型 ----
@@ -1507,6 +1508,34 @@ export async function getAllFavorites(): Promise<Record<string, Favorite>> {
   }
 }
 
+/** 分段收藏等待服务端确认再更新缓存，失败时不能给用户“已收藏”的假状态。 */
+async function persistSegmentFavorite(key: string, favorite?: Favorite): Promise<void> {
+  if (typeof window === 'undefined') throw new Error('只能在浏览器中修改收藏');
+  let favorites: Record<string, Favorite>;
+  if (STORAGE_TYPE !== 'localstorage') {
+    // 缓存未加载时先读取，避免只含一条收藏的事件使其他收藏暂时消失。
+    if (!cacheManager.getCachedFavorites()) await getAllFavorites();
+    const response = await fetchWithAuth(
+      favorite ? '/api/favorites' : `/api/favorites?key=${encodeURIComponent(key)}`,
+      favorite ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, favorite }),
+      } : { method: 'DELETE' }
+    );
+    const result = await response.json();
+    if (!response.ok || result?.success !== true) throw new Error(result?.error || '收藏操作未成功');
+    favorites = { ...(cacheManager.getCachedFavorites() || {}) };
+  } else {
+    favorites = { ...(await getAllFavorites()) };
+  }
+  if (favorite) favorites[key] = favorite;
+  else delete favorites[key];
+  if (STORAGE_TYPE !== 'localstorage') cacheManager.cacheFavorites(favorites);
+  else localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
+  window.dispatchEvent(new CustomEvent('favoritesUpdated', { detail: favorites }));
+}
+
 /**
  * 保存收藏。
  * 数据库存储模式下使用乐观更新：先更新缓存，再异步同步到数据库。
@@ -1516,6 +1545,9 @@ export async function saveFavorite(
   id: string,
   favorite: Favorite
 ): Promise<void> {
+  if (source === 'openlist' && id.startsWith('segment-v1:')) {
+    return persistSegmentFavorite(generateStorageKey(source, id), favorite);
+  }
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
@@ -1579,6 +1611,9 @@ export async function deleteFavorite(
   source: string,
   id: string
 ): Promise<void> {
+  if (source === 'openlist' && id.startsWith('segment-v1:')) {
+    return persistSegmentFavorite(generateStorageKey(source, id));
+  }
   const key = generateStorageKey(source, id);
 
   // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）

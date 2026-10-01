@@ -47,6 +47,7 @@ import { dispatchNotificationChannels } from './notification-dispatch';
 export class D1Storage implements IStorage {
   private db: DatabaseAdapter;
   private schemaReady: Promise<void>;
+  private favoriteSchemaReady?: Promise<void>;
   public adapter: RedisHashAdapter;
 
   constructor(adapter: DatabaseAdapter) {
@@ -278,6 +279,25 @@ export class D1Storage implements IStorage {
 
   // ==================== 收藏 ====================
 
+  private ensureFavoriteSegmentColumn(): Promise<void> {
+    if (!this.favoriteSchemaReady) {
+      this.favoriteSchemaReady = (async () => {
+        const columns = await this.db.prepare('PRAGMA table_info(favorites)').all();
+        if (!columns.success) throw new Error(columns.error || '读取收藏表结构失败');
+        if (columns.results?.some((column: any) => column.name === 'segment_json')) return;
+        try {
+          const result = await this.db.prepare('ALTER TABLE favorites ADD COLUMN segment_json TEXT').run();
+          if (!result.success && !/duplicate column|already exists/i.test(result.error || '')) {
+            throw new Error(result.error || '迁移收藏表失败');
+          }
+        } catch (error) {
+          if (!/duplicate column|already exists/i.test((error as Error).message)) throw error;
+        }
+      })();
+    }
+    return this.favoriteSchemaReady;
+  }
+
   async getFavorite(userName: string, key: string): Promise<Favorite | null> {
     try {
       const result = await this.db
@@ -299,15 +319,16 @@ export class D1Storage implements IStorage {
     favorite: Favorite
   ): Promise<void> {
     try {
-      await this.db
+      await this.ensureFavoriteSegmentColumn();
+      const result = await this.db
         .prepare(
           `
           INSERT INTO favorites (
             username, key, source_name, total_episodes, title,
             year, cover, save_time, search_title, origin,
-            is_completed, vod_remarks
+            is_completed, vod_remarks, segment_json
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(username, key) DO UPDATE SET
             source_name = excluded.source_name,
             total_episodes = excluded.total_episodes,
@@ -318,7 +339,8 @@ export class D1Storage implements IStorage {
             search_title = excluded.search_title,
             origin = excluded.origin,
             is_completed = excluded.is_completed,
-            vod_remarks = excluded.vod_remarks
+            vod_remarks = excluded.vod_remarks,
+            segment_json = excluded.segment_json
         `
         )
         .bind(
@@ -333,9 +355,11 @@ export class D1Storage implements IStorage {
           favorite.search_title || '',
           favorite.origin || null,
           favorite.is_completed ? 1 : 0,
-          favorite.vod_remarks || null
+          favorite.vod_remarks || null,
+          favorite.segment ? JSON.stringify(favorite.segment) : null
         )
         .run();
+      if (!result.success) throw new Error(result.error || '保存收藏失败');
     } catch (err) {
       console.error('D1Storage.setFavorite error:', err);
       throw err;
@@ -354,6 +378,7 @@ export class D1Storage implements IStorage {
         .all();
 
       const favorites: { [key: string]: Favorite } = {};
+      if (!results.success) throw new Error(results.error || '读取收藏失败');
       if (results.results) {
         for (const row of results.results) {
           const favorite = this.rowToFavorite(row);
@@ -369,10 +394,11 @@ export class D1Storage implements IStorage {
 
   async deleteFavorite(userName: string, key: string): Promise<void> {
     try {
-      await this.db
+      const result = await this.db
         .prepare('DELETE FROM favorites WHERE username = ? AND key = ?')
         .bind(userName, key)
         .run();
+      if (!result.success) throw new Error(result.error || '删除收藏失败');
     } catch (err) {
       console.error('D1Storage.deleteFavorite error:', err);
       throw err;
@@ -1263,6 +1289,7 @@ export class D1Storage implements IStorage {
       origin: row.origin as 'vod' | 'live' | undefined,
       is_completed: row.is_completed === 1,
       vod_remarks: row.vod_remarks || undefined,
+      segment: row.segment_json ? JSON.parse(row.segment_json) : undefined,
     };
   }
 

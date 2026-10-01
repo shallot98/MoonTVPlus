@@ -4,7 +4,7 @@ import { AlertTriangle, ChevronLeft, Loader2, Trash2, X } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-export type DeleteScope = 'segment' | 'broadcast';
+export type DeleteScope = 'segment' | 'broadcast' | 'streamer';
 
 export interface DeleteBroadcastOption {
   /** 选项文字：删除本场直播（N 段，MM-DD HH:MM–HH:MM） */
@@ -32,6 +32,10 @@ interface DeleteEpisodeDialogProps {
   broadcastDisabledReason: string | null;
   /** 仅用于不可用时的按钮文字 */
   broadcastFallbackLabel: string;
+  streamer: { fileNames: string[] } | null;
+  isLoadingStreamer: boolean;
+  streamerError: string | null;
+  onPreviewStreamer: () => void;
   isDeleting: boolean;
   error: string | null;
   /** 整场删除中失败的文件 */
@@ -53,6 +57,10 @@ export default function DeleteEpisodeDialog({
   broadcast,
   broadcastDisabledReason,
   broadcastFallbackLabel,
+  streamer,
+  isLoadingStreamer,
+  streamerError,
+  onPreviewStreamer,
   isDeleting,
   error,
   failedFiles,
@@ -132,7 +140,9 @@ export default function DeleteEpisodeDialog({
       ? '删除本分段'
       : scope === 'broadcast'
         ? '删除本场直播'
-        : '删除';
+        : scope === 'streamer'
+          ? '删除该主播全部直播'
+          : '删除';
 
   const infoRow = (label: string, value: ReactNode, mono = false) => (
     <div className='flex gap-2'>
@@ -236,6 +246,16 @@ export default function DeleteEpisodeDialog({
                     )
                   )}
                 </button>
+                <button
+                  type='button'
+                  onClick={() => { setScope('streamer'); onPreviewStreamer(); }}
+                  className='w-full min-h-[48px] text-left px-4 py-3 rounded-xl border border-red-500 dark:border-red-600 text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors'
+                >
+                  <div className='font-medium'>删除该主播全部直播</div>
+                  <div className='text-xs text-gray-500 dark:text-gray-400 mt-0.5'>
+                    删除该主播所有场次的全部视频，包含未显示的小视频
+                  </div>
+                </button>
               </div>
             </>
           )}
@@ -281,6 +301,35 @@ export default function DeleteEpisodeDialog({
                   </li>
                 ))}
               </ul>
+            </>
+          )}
+
+          {scope === 'streamer' && (
+            <>
+              <dl className='text-sm space-y-2'>
+                {infoRow('主播', <span className='font-medium'>{anchorName}</span>)}
+                {streamer && infoRow('视频', `${streamer.fileNames.length} 个`)}
+              </dl>
+              <p className='text-sm font-medium text-red-600 dark:text-red-400'>
+                将从 OpenList（沃盘）永久删除该主播全部视频，包含因大小过滤而未显示的视频，无法撤销。
+              </p>
+              {isLoadingStreamer && <p role='status' className='text-sm'>正在获取全部视频列表…</p>}
+              {streamerError && <p role='alert' className='text-sm text-red-600 dark:text-red-400'>{streamerError}</p>}
+              {!isLoadingStreamer && (
+                <button type='button' disabled={isDeleting} onClick={onPreviewStreamer}
+                  className='text-sm text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50'>
+                  重新获取列表
+                </button>
+              )}
+              {streamer && streamer.fileNames.length === 0 && <p className='text-sm'>该主播已没有可删除的视频。</p>}
+              {streamer && streamer.fileNames.length > 0 && (
+                <ul className='max-h-48 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 divide-y divide-gray-100 dark:divide-gray-800'
+                  aria-label='将删除的全部视频' tabIndex={0}>
+                  {streamer.fileNames.map((name) => (
+                    <li key={name} className='px-3 py-1.5 font-mono text-xs leading-5 break-all'>{name}</li>
+                  ))}
+                </ul>
+              )}
             </>
           )}
 
@@ -330,7 +379,7 @@ export default function DeleteEpisodeDialog({
             <button
               type='button'
               onClick={() => onConfirm(scope)}
-              disabled={isDeleting}
+              disabled={isDeleting || (scope === 'streamer' && (isLoadingStreamer || !!streamerError || !streamer?.fileNames.length))}
               className='inline-flex items-center gap-1.5 px-4 py-2 min-h-[40px] text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed'
             >
               {isDeleting ? (
@@ -341,7 +390,7 @@ export default function DeleteEpisodeDialog({
               ) : (
                 <>
                   <Trash2 className='w-4 h-4' aria-hidden='true' />
-                  {scope === 'broadcast' ? '确认删除整场' : '确认删除'}
+                  {scope === 'streamer' ? '确认删除全部视频' : scope === 'broadcast' ? '确认删除整场' : '确认删除'}
                 </>
               )}
             </button>

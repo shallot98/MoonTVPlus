@@ -4,6 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { makeOpenListSegmentFavoriteId } from '@/lib/openlist-segment-favorite';
 import { Favorite } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -123,6 +124,19 @@ export async function POST(request: NextRequest) {
         { error: 'Invalid key format' },
         { status: 400 }
       );
+    }
+
+    if (favorite.segment || (source === 'openlist' && id.startsWith('segment-v1:'))) {
+      const segment = favorite.segment;
+      if (source !== 'openlist' || !segment ||
+        ['contentId', 'folder', 'fileName', 'title'].some((field) => {
+          const value = segment[field as keyof typeof segment];
+          return typeof value !== 'string' || !value || value.length > 4096;
+        }) ||
+        !segment.folder.startsWith('/') || segment.fileName.includes('/') || segment.fileName.includes('\\') ||
+        id !== makeOpenListSegmentFavoriteId(segment.folder, segment.fileName)) {
+        return NextResponse.json({ error: '分段收藏信息无效' }, { status: 400 });
+      }
     }
 
     const finalFavorite = {

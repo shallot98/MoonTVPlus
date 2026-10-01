@@ -32,6 +32,7 @@ export interface Favorite {
   origin?: 'vod' | 'live';
   is_completed?: boolean; // 是否已完结
   vod_remarks?: string; // 视频备注信息
+  segment?: import('./openlist-segment-favorite').OpenListSegmentFavorite;
 }
 
 // 存储接口

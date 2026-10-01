@@ -37,6 +37,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import { getBangumiSubjectUrl } from '@/lib/bangumi.client';
+import { buildOpenListSegmentPlayUrl, type OpenListSegmentFavorite } from '@/lib/openlist-segment-favorite';
 import { isNetdiskSource } from '@/lib/netdisk/source';
 import {
   base58Decode,
@@ -90,6 +91,7 @@ export interface VideoCardProps {
   typeName?: string;
   isAggregate?: boolean;
   origin?: 'vod' | 'live';
+  segment?: OpenListSegmentFavorite;
   releaseDate?: string; // 上映日期，格式：YYYY-MM-DD
   isUpcoming?: boolean; // 是否为即将上映
   seasonNumber?: number; // 季度编号
@@ -137,6 +139,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       typeName,
       isAggregate = false,
       origin = 'vod',
+      segment,
       releaseDate,
       isUpcoming = false,
       seasonNumber,
@@ -368,6 +371,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
               cover: actualPoster,
               total_episodes: actualEpisodes ?? 1,
               save_time: Date.now(),
+              ...(segment ? { segment } : {}),
             });
             if (from === 'search') {
               setSearchFavorited(true);
@@ -376,7 +380,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
             }
           }
         } catch (err) {
-          throw new Error('切换收藏状态失败');
+          window.dispatchEvent(new CustomEvent('globalError', {
+            detail: { message: `切换收藏状态失败：${err instanceof Error ? err.message : String(err)}` },
+          }));
         }
       },
       [
@@ -390,6 +396,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
         actualEpisodes,
         favorited,
         searchFavorited,
+        segment,
       ]
     );
 
@@ -420,6 +427,11 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       }
 
       onBeforeNavigate?.();
+      if (actualSource === 'openlist' && segment) {
+        // 同主播切换不同收藏时也重新初始化，避免播放旧分段。
+        window.location.href = buildOpenListSegmentPlayUrl(segment);
+        return;
+      }
 
       if (origin === 'live' && actualSource && actualId) {
         // 直播内容跳转到直播页面
@@ -489,6 +501,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       actualSearchType,
       onBeforeNavigate,
       isDuanju,
+      segment,
     ]);
 
     // 新标签页播放处理函数
@@ -499,6 +512,10 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       }
 
       onBeforeNavigate?.();
+      if (actualSource === 'openlist' && segment) {
+        window.open(buildOpenListSegmentPlayUrl(segment), '_blank', 'noopener,noreferrer');
+        return;
+      }
 
       if (origin === 'live' && actualSource && actualId) {
         // 直播内容跳转到直播页面
@@ -543,6 +560,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(
       actualSearchType,
       onBeforeNavigate,
       isDuanju,
+      segment,
     ]);
 
     // 检查搜索结果的收藏状态

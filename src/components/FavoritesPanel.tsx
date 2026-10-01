@@ -26,6 +26,7 @@ interface FavoriteItem {
   currentEpisode?: number;
   search_title?: string;
   origin?: 'vod' | 'live';
+  segment?: import('@/lib/openlist-segment-favorite').OpenListSegmentFavorite;
 }
 
 interface FavoritesPanelProps {
@@ -71,6 +72,7 @@ export const FavoritesPanel: React.FC<FavoritesPanelProps> = ({
             currentEpisode,
             search_title: fav?.search_title,
             origin: fav?.origin,
+            segment: fav.segment,
           } as FavoriteItem;
         });
       setFavoriteItems(sorted);
